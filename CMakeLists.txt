@@ -27,7 +27,8 @@ if(NOT TS_SANITIZER STREQUAL "none")
 endif()
 
 add_library(tsmalloc STATIC
-  src/tsmalloc.c)
+  src/tsmalloc.c
+  src/os.c)
 target_include_directories(tsmalloc
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

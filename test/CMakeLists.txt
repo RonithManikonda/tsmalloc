@@ -7,3 +7,4 @@ function(ts_add_test name)
 endfunction()
 
 ts_add_test(test_basic)
+ts_add_test(test_os)
