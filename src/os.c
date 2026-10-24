@@ -6,6 +6,8 @@
 
 #include "os.h"
 
+#include "internal.h"
+
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -31,15 +33,11 @@ size_t ts_os_page_size(void) {
     return ps;
 }
 
-static size_t round_up(size_t n, size_t align) {
-    return (n + align - 1) & ~(align - 1);
-}
-
 /* Returns 0 if rounding `n` up to `align` would overflow. */
 static size_t round_up_checked(size_t n, size_t align) {
     if (n > SIZE_MAX - (align - 1))
         return 0;
-    return round_up(n, align);
+    return ts_align_up(n, align);
 }
 
 static void *os_map(size_t size) {
@@ -101,7 +99,7 @@ void *ts_os_alloc_aligned(size_t size, size_t align) {
     char *raw = os_map(over);
     if (raw == NULL)
         return NULL;
-    char *aligned = (char *)round_up((uintptr_t)raw, align);
+    char *aligned = (char *)ts_align_up((uintptr_t)raw, align);
     size_t head = (size_t)(aligned - raw);
     size_t tail = over - head - size;
     os_unmap(raw, head);
@@ -112,13 +110,13 @@ void *ts_os_alloc_aligned(size_t size, size_t align) {
 void ts_os_free(void *p, size_t size) {
     if (p == NULL)
         return;
-    os_unmap(p, round_up(size, ts_os_page_size()));
+    os_unmap(p, ts_align_up(size, ts_os_page_size()));
 }
 
 void ts_os_decommit(void *p, size_t size) {
     size_t ps = ts_os_page_size();
-    uintptr_t start = round_up((uintptr_t)p, ps);
-    uintptr_t end = ((uintptr_t)p + size) & ~(uintptr_t)(ps - 1);
+    uintptr_t start = ts_align_up((uintptr_t)p, ps);
+    uintptr_t end = ts_align_down((uintptr_t)p + size, ps);
     if (end <= start)
         return;
 

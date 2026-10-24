@@ -8,3 +8,4 @@ endfunction()
 
 ts_add_test(test_basic)
 ts_add_test(test_os)
+ts_add_test(test_internal)
