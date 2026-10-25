@@ -28,7 +28,8 @@ endif()
 
 add_library(tsmalloc STATIC
   src/tsmalloc.c
-  src/os.c)
+  src/os.c
+  src/size_class.c)
 target_include_directories(tsmalloc
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
