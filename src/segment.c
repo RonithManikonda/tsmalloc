@@ -7,6 +7,7 @@ ts_segment_t *ts_segment_alloc(void) {
     if (seg == NULL)
         return NULL;
     /* mmap memory is zeroed, so only the non-zero fields need setting. */
+    seg->kind = TS_KIND_SEGMENT;
     for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++)
         seg->pages[i].index = (uint8_t)i;
     return seg;

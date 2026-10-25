@@ -1,19 +1,23 @@
 /*
  * Public entry points.
  *
- * Every pointer we hand out has a 16-byte header right in front of it that
- * says where the memory came from:
+ * Every pointer we hand out is found from its address alone:
  *
- *   - large (> TS_SMALL_MAX): our own mmap'd region, unmapped on free;
- *   - small: still forwarded to the system allocator until the page-based
- *     small allocator replaces it.
+ *   - small (<= TS_SMALL_MAX): a block in a page of a 4 MiB segment, with no
+ *     per-block header. Masking the pointer gives the segment, and the
+ *     segment's page descriptors give the block size.
+ *   - large: its own mapping, aligned to the segment size, with a 16-byte
+ *     ts_large_t at the start. Masking the pointer finds that too.
  *
- * Keeping a header on the forwarded path too means ts_free never has to
- * guess whose pointer it got, and a pointer we didn't allocate is caught by
- * the magic check instead of being passed to the wrong free.
+ * Both start with a `kind` word, so ts_free does one mask and one load to
+ * route the pointer. We mask `p - 1` rather than `p` so a large block with
+ * an alignment of 4 MiB or more (whose user pointer is itself segment
+ * aligned) can keep its header in the segment just before it; small blocks
+ * never sit at offset 0 of a segment, so for them it makes no difference.
  */
 #include "tsmalloc.h"
 
+#include "heap.h"
 #include "internal.h"
 #include "os.h"
 
@@ -22,19 +26,22 @@
 #include <string.h>
 #include <unistd.h>
 
-#define TS_MAGIC_LARGE 0x4c47ae11u /* region from ts_os_alloc */
-#define TS_MAGIC_LIBC  0x11bcae11u /* small block forwarded to libc */
-
 typedef struct {
-    size_t   usable; /* bytes the caller may use, starting at the user pointer */
-    uint32_t offset; /* user pointer - start of the underlying allocation */
-    uint32_t magic;
-} ts_header_t;
+    uint32_t kind;   /* TS_KIND_LARGE */
+    uint32_t lead;   /* user pointer - start of the mapping */
+    size_t   mapped; /* bytes mapped, a multiple of the OS page size */
+} ts_large_t;
 
-_Static_assert(sizeof(ts_header_t) == TS_ALIGN, "header keeps user pointers aligned");
+_Static_assert(sizeof(ts_large_t) == TS_ALIGN, "large header keeps user pointers aligned");
 
-TS_INLINE ts_header_t *header_of(const void *p) {
-    return (ts_header_t *)((char *)p - sizeof(ts_header_t));
+static ts_heap_t global_heap;
+
+TS_INLINE void *region_of(const void *p) {
+    return ts_ptr_segment((const char *)p - 1);
+}
+
+TS_INLINE uint32_t region_kind(const void *region) {
+    return *(const uint32_t *)region;
 }
 
 static void fatal(const char *msg) {
@@ -43,74 +50,73 @@ static void fatal(const char *msg) {
     abort();
 }
 
-/* Allocate `size` bytes aligned to `align` (a power of two >= TS_ALIGN).
- * The extra `align - TS_ALIGN` bytes leave room to slide the user pointer up
- * to the alignment; at TS_ALIGN no sliding is needed. */
-static void *alloc_aligned(size_t size, size_t align) {
-    size_t slack = sizeof(ts_header_t) + (align - TS_ALIGN);
-    if (size > SIZE_MAX - slack - TS_ALIGN || align > UINT32_MAX) {
+/* `size` bytes aligned to `align` (a power of two >= TS_ALIGN) in a mapping
+ * of their own. */
+static void *large_alloc(size_t size, size_t align) {
+    size_t lead = align > sizeof(ts_large_t) ? align : sizeof(ts_large_t);
+    if (align > ((size_t)1 << 31) || size > SIZE_MAX - lead - TS_SEGMENT_SIZE) {
         errno = ENOMEM;
         return NULL;
     }
-    size_t total = size + slack;
-
-    char *raw;
-    uint32_t magic;
-    if (size > TS_SMALL_MAX) {
-        raw = ts_os_alloc(total);
-        magic = TS_MAGIC_LARGE;
-    } else {
-        raw = malloc(total); /* 16-aligned on every platform we support */
-        magic = TS_MAGIC_LIBC;
-    }
-    if (raw == NULL) {
-        errno = ENOMEM;
+    size_t total = lead + size;
+    size_t map_align = align > TS_SEGMENT_SIZE ? align : TS_SEGMENT_SIZE;
+    char *base = ts_os_alloc_aligned(total, map_align);
+    if (base == NULL)
         return NULL;
-    }
 
-    char *user = (char *)ts_align_up((uintptr_t)raw + sizeof(ts_header_t), align);
-    ts_header_t *h = header_of(user);
-    h->offset = (uint32_t)(user - raw);
-    h->magic = magic;
-    if (magic == TS_MAGIC_LARGE) {
-        /* The mapping is rounded up to whole OS pages; the tail is ours to
-         * hand out, which is what makes realloc-in-place possible later. */
-        size_t mapped = ts_align_up(total, ts_os_page_size());
-        h->usable = mapped - h->offset;
-    } else {
-        h->usable = total - h->offset;
-    }
+    char *user = base + lead;
+    ts_large_t *h = region_of(user);
+    h->kind = TS_KIND_LARGE;
+    h->lead = (uint32_t)lead;
+    /* The mapping is rounded up to whole OS pages; the tail is ours to hand
+     * out, which is what makes realloc-in-place possible. */
+    h->mapped = ts_align_up(total, ts_os_page_size());
     return user;
 }
 
-static ts_header_t *checked_header(const void *p) {
-    ts_header_t *h = header_of(p);
-    if (ts_unlikely(h->magic != TS_MAGIC_LARGE && h->magic != TS_MAGIC_LIBC))
-        fatal("tsmalloc: free/realloc of a pointer not from tsmalloc (or already freed)\n");
-    return h;
+static void large_free(ts_large_t *h, void *p) {
+    ts_os_free((char *)p - h->lead, h->mapped);
+}
+
+TS_INLINE size_t large_usable(const ts_large_t *h) {
+    return h->mapped - h->lead;
+}
+
+static TS_NOINLINE void bad_pointer(void) {
+    fatal("tsmalloc: free/realloc of a pointer not from tsmalloc\n");
 }
 
 void *ts_malloc(size_t size) {
-    return alloc_aligned(size, TS_ALIGN);
+    if (ts_likely(size <= TS_SMALL_MAX))
+        return ts_heap_malloc_small(&global_heap, size);
+    return large_alloc(size, TS_ALIGN);
 }
 
 void ts_free(void *p) {
     if (p == NULL)
         return;
-    ts_header_t *h = checked_header(p);
-    char *raw = (char *)p - h->offset;
-    uint32_t magic = h->magic;
-    h->magic = 0; /* a second free of the same pointer now hits the check */
-    if (magic == TS_MAGIC_LARGE)
-        ts_os_free(raw, h->offset + h->usable);
-    else
-        free(raw);
+    void *region = region_of(p);
+    uint32_t kind = region_kind(region);
+    if (ts_likely(kind == TS_KIND_SEGMENT)) {
+        ts_segment_t *seg = region;
+        ts_heap_free_small(&global_heap, seg, ts_ptr_page(seg, p), p);
+    } else if (kind == TS_KIND_LARGE) {
+        large_free(region, p);
+    } else {
+        bad_pointer();
+    }
 }
 
 size_t ts_usable_size(const void *p) {
     if (p == NULL)
         return 0;
-    return checked_header(p)->usable;
+    void *region = region_of(p);
+    uint32_t kind = region_kind(region);
+    if (kind == TS_KIND_SEGMENT)
+        return ts_ptr_page(region, p)->block_size;
+    if (kind != TS_KIND_LARGE)
+        bad_pointer();
+    return large_usable(region);
 }
 
 void *ts_calloc(size_t count, size_t size) {
@@ -122,8 +128,8 @@ void *ts_calloc(size_t count, size_t size) {
     void *p = ts_malloc(total);
     if (p == NULL)
         return NULL;
-    /* Fresh mappings are already zero. */
-    if (header_of(p)->magic != TS_MAGIC_LARGE)
+    /* Fresh mappings are already zero; recycled small blocks are not. */
+    if (region_kind(region_of(p)) != TS_KIND_LARGE)
         memset(p, 0, total);
     return p;
 }
@@ -146,7 +152,11 @@ void *ts_realloc(void *p, size_t size) {
 int ts_posix_memalign(void **out, size_t alignment, size_t size) {
     if (alignment < sizeof(void *) || !ts_is_pow2(alignment))
         return EINVAL;
-    void *p = alloc_aligned(size, alignment < TS_ALIGN ? TS_ALIGN : alignment);
+    void *p;
+    if (alignment <= TS_ALIGN && size <= TS_SMALL_MAX)
+        p = ts_heap_malloc_small(&global_heap, size);
+    else /* over-aligned requests all take a mapping for now */
+        p = large_alloc(size, alignment < TS_ALIGN ? TS_ALIGN : alignment);
     if (p == NULL)
         return ENOMEM;
     *out = p;

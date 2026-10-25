@@ -22,9 +22,10 @@ enough to explain end to end:
 
 ## Status
 
-Early days. Large allocations (> 16 KiB) get their own `mmap`'d region. Small ones still forward to
-the system allocator while the page-based allocator is being built. Every pointer carries a small
-header saying where it came from, so `ts_free` can always route it correctly.
+Early days. Small sizes (up to 16 KiB) now come from pages in 4 MiB segments, through one global
+heap with a page queue per size class (single-threaded for now, no locking yet). Larger sizes get
+their own `mmap`'d region. There are no per-block headers: `ts_free` masks the pointer to find its
+segment or mapping and reads the block size from there.
 
 ## Building
 

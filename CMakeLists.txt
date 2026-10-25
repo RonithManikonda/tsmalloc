@@ -31,7 +31,8 @@ add_library(tsmalloc STATIC
   src/os.c
   src/size_class.c
   src/segment.c
-  src/page.c)
+  src/page.c
+  src/heap.c)
 target_include_directories(tsmalloc
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

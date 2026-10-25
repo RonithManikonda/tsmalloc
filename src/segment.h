@@ -27,14 +27,24 @@ struct ts_block_s {
 struct ts_page_s {
     uint8_t index;       /* position in the segment */
     uint8_t in_use;      /* handed out by ts_segment_page_alloc */
+    uint8_t size_class;
+    uint8_t queued;      /* linked into its heap's queue for size_class */
     uint16_t capacity;   /* blocks that fit in the page */
     uint16_t reserved;   /* blocks carved out so far (bump cursor) */
     uint16_t used;       /* blocks currently allocated */
     uint32_t block_size;
     ts_block_t *free;    /* blocks ready to hand out */
+    ts_page_t *next;     /* page queue links */
+    ts_page_t *prev;
 };
 
+/* First word of every region a pointer can come from, so free can tell a
+ * page-backed block from a large mapping after one mask. */
+#define TS_KIND_SEGMENT 0x5e67a11cu
+#define TS_KIND_LARGE   0x4c47ae11u
+
 struct ts_segment_s {
+    uint32_t kind;      /* TS_KIND_SEGMENT */
     ts_segment_t *next; /* links for whoever owns the segment */
     ts_segment_t *prev;
     uint32_t used_pages;
