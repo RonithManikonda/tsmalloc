@@ -15,12 +15,23 @@
  *   ^ p & ~TS_SEGMENT_MASK    ^ (p - segment) >> TS_PAGE_SHIFT == 1
  */
 
+/* A free block's first word links it into its page's free list. Live blocks
+ * belong to the user entirely; no per-block header. */
+struct ts_block_s {
+    ts_block_t *next;
+};
+
 /* Page descriptor. Lives in the segment header, not in the page itself, so
- * the page's memory is all blocks. Block and free-list fields are added
- * with the page allocator. */
+ * the page's memory is all blocks (and `ts_ptr_segment(page)` works on the
+ * descriptor too). */
 struct ts_page_s {
-    uint8_t index;  /* position in the segment */
-    uint8_t in_use; /* handed out by ts_segment_page_alloc */
+    uint8_t index;       /* position in the segment */
+    uint8_t in_use;      /* handed out by ts_segment_page_alloc */
+    uint16_t capacity;   /* blocks that fit in the page */
+    uint16_t reserved;   /* blocks carved out so far (bump cursor) */
+    uint16_t used;       /* blocks currently allocated */
+    uint32_t block_size;
+    ts_block_t *free;    /* blocks ready to hand out */
 };
 
 struct ts_segment_s {
