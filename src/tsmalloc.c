@@ -125,28 +125,62 @@ void *ts_calloc(size_t count, size_t size) {
         errno = ENOMEM;
         return NULL;
     }
-    void *p = ts_malloc(total);
-    if (p == NULL)
-        return NULL;
-    /* Fresh mappings are already zero; recycled small blocks are not. */
-    if (region_kind(region_of(p)) != TS_KIND_LARGE)
+    if (total > TS_SMALL_MAX)
+        return large_alloc(total, TS_ALIGN); /* fresh mmap memory is zero */
+    void *p = ts_heap_malloc_small(&global_heap, total);
+    /* Small blocks are recycled, and even never-used ones have a free-list
+     * link written into their first word, so they always need clearing. */
+    if (p != NULL)
         memset(p, 0, total);
     return p;
 }
 
-void *ts_realloc(void *p, size_t size) {
-    if (p == NULL)
-        return ts_malloc(size);
-    size_t old = ts_usable_size(p);
-    /* Fits already and wouldn't waste more than half: keep the block. */
-    if (size <= old && size >= old / 2)
-        return p;
+/* Give back the whole OS pages of a large mapping beyond the first `size`
+ * bytes, keeping the block where it is. */
+static void large_shrink(ts_large_t *h, void *p, size_t size) {
+    size_t keep = ts_align_up(h->lead + size, ts_os_page_size());
+    if (keep < h->mapped) {
+        char *base = (char *)p - h->lead;
+        ts_os_free(base + keep, h->mapped - keep);
+        h->mapped = keep;
+    }
+}
+
+static void *move_block(void *p, size_t old, size_t size) {
     void *q = ts_malloc(size);
     if (q == NULL)
         return NULL; /* p stays valid, as the standard requires */
     memcpy(q, p, old < size ? old : size);
     ts_free(p);
     return q;
+}
+
+void *ts_realloc(void *p, size_t size) {
+    if (p == NULL)
+        return ts_malloc(size);
+    void *region = region_of(p);
+    uint32_t kind = region_kind(region);
+
+    if (ts_likely(kind == TS_KIND_SEGMENT)) {
+        ts_page_t *page = ts_ptr_page(region, p);
+        size_t old = page->block_size;
+        /* Same block when the size stays in its class, or still fits with
+         * at least half of the block in use (saves a copy for modest
+         * shrinks). A big shrink moves so the rest isn't stranded. */
+        if (size <= old && (size >= old / 2 || ts_size_to_class(size) == page->size_class))
+            return p;
+        return move_block(p, old, size);
+    }
+    if (kind != TS_KIND_LARGE)
+        bad_pointer();
+
+    ts_large_t *h = region;
+    size_t old = large_usable(h);
+    if (size <= old && size > TS_SMALL_MAX) {
+        large_shrink(h, p, size);
+        return p;
+    }
+    return move_block(p, old, size);
 }
 
 int ts_posix_memalign(void **out, size_t alignment, size_t size) {
