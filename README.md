@@ -22,8 +22,9 @@ enough to explain end to end:
 
 ## Status
 
-Early scaffolding. The public API (`include/tsmalloc.h`) exists and currently forwards to the
-system allocator so tests can be written first. The real allocator replaces it piece by piece.
+Early days. Large allocations (> 16 KiB) get their own `mmap`'d region. Small ones still forward to
+the system allocator while the page-based allocator is being built. Every pointer carries a small
+header saying where it came from, so `ts_free` can always route it correctly.
 
 ## Building
 
