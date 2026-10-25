@@ -10,7 +10,7 @@
  *
  *   segment
  *   +---------+-------------+-------------+-----+--------------+
- *   | header  | page 0 data |   page 1    | ... |   page 63    |
+ *   | header  | page 0 data |   page 1    | ... |   page 63    |   (page 0 data at +4 KiB)
  *   +---------+-------------+-------------+-----+--------------+
  *   ^ p & ~TS_SEGMENT_MASK    ^ (p - segment) >> TS_PAGE_SHIFT == 1
  */
@@ -51,8 +51,13 @@ struct ts_segment_s {
     ts_page_t pages[TS_PAGES_PER_SEGMENT];
 };
 
-/* Keep the header small next to page 0, or page 0 loses most of its blocks. */
-_Static_assert(sizeof(ts_segment_t) <= TS_PAGE_SIZE / 8, "segment header fits early in page 0");
+/* Page 0's data starts at this offset rather than right after the header.
+ * Every page then starts on a 4 KiB boundary, so a block whose size is a
+ * multiple of an alignment up to 4 KiB is aligned in any page. That is what
+ * lets small aligned_alloc requests come from ordinary size classes. */
+#define TS_PAGE0_OFFSET ((size_t)4096)
+
+_Static_assert(sizeof(ts_segment_t) <= TS_PAGE0_OFFSET, "segment header fits before page 0 data");
 
 /* Fresh segment from the OS with every page free, or NULL. */
 ts_segment_t *ts_segment_alloc(void);
@@ -73,18 +78,17 @@ TS_INLINE ts_page_t *ts_ptr_page(ts_segment_t *seg, const void *p) {
     return &seg->pages[idx];
 }
 
-/* Where page data starts: just after the header for page 0, at the 64 KiB
- * boundary for the rest. */
+/* Where page data starts: TS_PAGE0_OFFSET in for page 0 (after the header),
+ * at the 64 KiB boundary for the rest. */
 TS_INLINE uint8_t *ts_page_start(ts_segment_t *seg, const ts_page_t *page) {
     uint8_t *start = (uint8_t *)seg + ((size_t)page->index << TS_PAGE_SHIFT);
     if (page->index == 0)
-        start += ts_align_up(sizeof(ts_segment_t), TS_ALIGN);
+        start += TS_PAGE0_OFFSET;
     return start;
 }
 
 TS_INLINE size_t ts_page_usable(const ts_page_t *page) {
-    return page->index == 0 ? TS_PAGE_SIZE - ts_align_up(sizeof(ts_segment_t), TS_ALIGN)
-                            : TS_PAGE_SIZE;
+    return page->index == 0 ? TS_PAGE_SIZE - TS_PAGE0_OFFSET : TS_PAGE_SIZE;
 }
 
 #endif /* TS_SEGMENT_H */

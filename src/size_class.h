@@ -31,4 +31,17 @@ TS_INLINE size_t ts_class_size(unsigned cls) {
     return ts_class_sizes[cls];
 }
 
+/* Smallest class that holds `size` bytes and whose block size is a multiple
+ * of `align` (a power of two), or TS_NUM_CLASSES if none does. Blocks of
+ * such a class are `align`-aligned as long as their page start is, which
+ * holds for align <= TS_PAGE0_OFFSET. */
+TS_INLINE unsigned ts_size_to_class_aligned(size_t size, size_t align) {
+    if (size > TS_SMALL_MAX)
+        return TS_NUM_CLASSES;
+    unsigned cls = ts_size_to_class(size);
+    while (cls < TS_NUM_CLASSES && (ts_class_sizes[cls] & (align - 1)) != 0)
+        cls++;
+    return cls;
+}
+
 #endif /* TS_SIZE_CLASS_H */

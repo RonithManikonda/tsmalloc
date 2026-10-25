@@ -27,6 +27,9 @@ struct ts_heap_s {
  * set when the OS is out of memory. */
 void *ts_heap_malloc_small(ts_heap_t *heap, size_t size);
 
+/* Block of exactly ts_class_size(cls) bytes. */
+void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls);
+
 /* Return a block from ts_heap_malloc_small. `page` is its page descriptor. */
 void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, void *p);
 

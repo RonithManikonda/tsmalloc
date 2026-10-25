@@ -183,26 +183,37 @@ void *ts_realloc(void *p, size_t size) {
     return move_block(p, old, size);
 }
 
+/* `alignment` is a power of two. */
+static void *aligned_alloc_checked(size_t alignment, size_t size) {
+    if (alignment <= TS_ALIGN)
+        return ts_malloc(size);
+    if (alignment <= TS_PAGE0_OFFSET) {
+        unsigned cls = ts_size_to_class_aligned(size, alignment);
+        if (cls < TS_NUM_CLASSES)
+            return ts_heap_malloc_class(&global_heap, cls);
+    }
+    /* Bigger alignments, or sizes past the small classes: a mapping of its
+     * own, over-allocated by the alignment so the block can slide up. */
+    return large_alloc(size, alignment);
+}
+
 int ts_posix_memalign(void **out, size_t alignment, size_t size) {
     if (alignment < sizeof(void *) || !ts_is_pow2(alignment))
         return EINVAL;
-    void *p;
-    if (alignment <= TS_ALIGN && size <= TS_SMALL_MAX)
-        p = ts_heap_malloc_small(&global_heap, size);
-    else /* over-aligned requests all take a mapping for now */
-        p = large_alloc(size, alignment < TS_ALIGN ? TS_ALIGN : alignment);
+    void *p = aligned_alloc_checked(alignment, size);
     if (p == NULL)
         return ENOMEM;
     *out = p;
     return 0;
 }
 
+/* Unlike posix_memalign, any power of two is a valid alignment here,
+ * including ones smaller than a pointer. The size doesn't have to be a
+ * multiple of the alignment (C17 dropped that requirement). */
 void *ts_aligned_alloc(size_t alignment, size_t size) {
-    void *p = NULL;
-    int err = ts_posix_memalign(&p, alignment, size);
-    if (err != 0) {
-        errno = err;
+    if (!ts_is_pow2(alignment)) {
+        errno = EINVAL;
         return NULL;
     }
-    return p;
+    return aligned_alloc_checked(alignment, size);
 }

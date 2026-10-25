@@ -68,7 +68,10 @@ static void page_retire(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
 }
 
 void *ts_heap_malloc_small(ts_heap_t *heap, size_t size) {
-    unsigned cls = ts_size_to_class(size);
+    return ts_heap_malloc_class(heap, ts_size_to_class(size));
+}
+
+void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls) {
     ts_page_queue_t *q = &heap->pages[cls];
 
     for (ts_page_t *page = q->head; page != NULL; page = q->head) {
