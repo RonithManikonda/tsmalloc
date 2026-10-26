@@ -18,3 +18,4 @@ function(ts_add_bench name)
 endfunction()
 
 ts_add_bench(threadtest --iters=200)
+ts_add_bench(larson --iters=20000)
