@@ -11,6 +11,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(TS_BUILD_TESTS "Build unit + stress tests" ON)
+option(TS_BUILD_BENCH "Build benchmarks" ON)
 set(TS_SANITIZER "none" CACHE STRING "Sanitizer: none|address|thread|undefined")
 set_property(CACHE TS_SANITIZER PROPERTY STRINGS none address thread undefined)
 
@@ -41,4 +42,8 @@ target_link_libraries(tsmalloc PUBLIC Threads::Threads)
 if(TS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)
+endif()
+
+if(TS_BUILD_BENCH)
+  add_subdirectory(bench)
 endif()
