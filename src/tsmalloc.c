@@ -22,6 +22,7 @@
 #include "os.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -34,7 +35,28 @@ typedef struct {
 
 _Static_assert(sizeof(ts_large_t) == TS_ALIGN, "large header keeps user pointers aligned");
 
+/* One heap shared by every thread, behind one lock. This is the simple
+ * design the thread-local heaps will be measured against; large blocks
+ * only touch mmap/munmap and stay outside the lock. */
 static ts_heap_t global_heap;
+static pthread_mutex_t global_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void *small_alloc_class(unsigned cls) {
+    pthread_mutex_lock(&global_lock);
+    void *p = ts_heap_malloc_class(&global_heap, cls);
+    pthread_mutex_unlock(&global_lock);
+    return p;
+}
+
+TS_INLINE void *small_alloc(size_t size) {
+    return small_alloc_class(ts_size_to_class(size));
+}
+
+static void small_free(ts_segment_t *seg, void *p) {
+    pthread_mutex_lock(&global_lock);
+    ts_heap_free_small(&global_heap, seg, ts_ptr_page(seg, p), p);
+    pthread_mutex_unlock(&global_lock);
+}
 
 TS_INLINE void *region_of(const void *p) {
     return ts_ptr_segment((const char *)p - 1);
@@ -88,7 +110,7 @@ static TS_NOINLINE void bad_pointer(void) {
 
 void *ts_malloc(size_t size) {
     if (ts_likely(size <= TS_SMALL_MAX))
-        return ts_heap_malloc_small(&global_heap, size);
+        return small_alloc(size);
     return large_alloc(size, TS_ALIGN);
 }
 
@@ -98,8 +120,7 @@ void ts_free(void *p) {
     void *region = region_of(p);
     uint32_t kind = region_kind(region);
     if (ts_likely(kind == TS_KIND_SEGMENT)) {
-        ts_segment_t *seg = region;
-        ts_heap_free_small(&global_heap, seg, ts_ptr_page(seg, p), p);
+        small_free(region, p);
     } else if (kind == TS_KIND_LARGE) {
         large_free(region, p);
     } else {
@@ -127,7 +148,7 @@ void *ts_calloc(size_t count, size_t size) {
     }
     if (total > TS_SMALL_MAX)
         return large_alloc(total, TS_ALIGN); /* fresh mmap memory is zero */
-    void *p = ts_heap_malloc_small(&global_heap, total);
+    void *p = small_alloc(total);
     /* Small blocks are recycled, and even never-used ones have a free-list
      * link written into their first word, so they always need clearing. */
     if (p != NULL)
@@ -190,7 +211,7 @@ static void *aligned_alloc_checked(size_t alignment, size_t size) {
     if (alignment <= TS_PAGE0_OFFSET) {
         unsigned cls = ts_size_to_class_aligned(size, alignment);
         if (cls < TS_NUM_CLASSES)
-            return ts_heap_malloc_class(&global_heap, cls);
+            return small_alloc_class(cls);
     }
     /* Bigger alignments, or sizes past the small classes: a mapping of its
      * own, over-allocated by the alignment so the block can slide up. */

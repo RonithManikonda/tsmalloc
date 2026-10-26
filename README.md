@@ -23,7 +23,8 @@ enough to explain end to end:
 ## Status
 
 Early days. Small sizes (up to 16 KiB) now come from pages in 4 MiB segments, through one global
-heap with a page queue per size class (single-threaded for now, no locking yet). Larger sizes get
+heap with a page queue per size class. That heap sits behind a single mutex: thread-safe, but
+deliberately naive. It's the baseline the thread-local design will be measured against. Larger sizes get
 their own `mmap`'d region. There are no per-block headers: `ts_free` masks the pointer to find its
 segment or mapping and reads the block size from there.
 
