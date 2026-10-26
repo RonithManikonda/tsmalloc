@@ -19,3 +19,4 @@ endfunction()
 
 ts_add_bench(threadtest --iters=200)
 ts_add_bench(larson --iters=20000)
+ts_add_bench(xmalloc --iters=20000)
