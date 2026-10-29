@@ -28,6 +28,10 @@ deliberately naive. It's the baseline the thread-local design will be measured a
 their own `mmap`'d region. There are no per-block headers: `ts_free` masks the pointer to find its
 segment or mapping and reads the block size from there.
 
+Benchmarks and the first numbers against macOS libmalloc are in
+[docs/benchmarks.md](docs/benchmarks.md). Run them with `scripts/bench.sh` (`--quick` for a short
+sanity run).
+
 ## Building
 
 ```sh
