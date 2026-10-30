@@ -39,8 +39,8 @@ _Static_assert(sizeof(ts_large_t) == TS_ALIGN, "large header keeps user pointers
  * once tsmalloc is malloc.
  *
  * Heaps aren't released yet when their thread exits; the heap and its
- * segments stay, and other threads' frees into it pile up on its remote
- * list. Abandoning and adopting them comes later. */
+ * segments stay, and other threads' frees into it pile up on its pages'
+ * remote lists. Abandoning and adopting them comes later. */
 static _Thread_local ts_heap_t *tl_heap;
 
 static TS_NOINLINE ts_heap_t *heap_create(void) {
@@ -73,7 +73,7 @@ static void small_free(ts_segment_t *seg, void *p) {
     if (ts_likely(owner == tl_heap))
         ts_heap_free_small(owner, seg, ts_ptr_page(seg, p), p);
     else
-        ts_heap_free_remote(owner, p);
+        ts_heap_free_remote(owner, ts_ptr_page(seg, p), p);
 }
 
 TS_INLINE void *region_of(const void *p) {

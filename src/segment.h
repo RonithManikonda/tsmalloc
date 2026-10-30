@@ -3,6 +3,8 @@
 
 #include "internal.h"
 
+#include <stdatomic.h>
+
 /*
  * A segment is a 4 MiB region aligned to 4 MiB. Its first bytes hold this
  * header, including one descriptor per 64 KiB page; page 0's usable area
@@ -34,6 +36,9 @@ struct ts_page_s {
     uint16_t used;       /* blocks currently allocated */
     uint32_t block_size;
     ts_block_t *free;    /* blocks ready to hand out */
+    /* Blocks freed by other threads, pushed lock-free; the owner splices
+     * them into `free` when it runs dry. The low bit is TS_TF_FULL. */
+    _Atomic uintptr_t thread_free;
     ts_page_t *next;     /* page queue links */
     ts_page_t *prev;
 };

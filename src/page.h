@@ -18,6 +18,13 @@
  * a quarter of one on Apple silicon; either way small next to the page. */
 #define TS_PAGE_EXTEND_BYTES ((size_t)4096)
 
+/* Flag in page->thread_free (blocks are 16-aligned, so the low bit is free):
+ * the page was full and the owner took it off its queue, so it won't look
+ * at thread_free again. The first remote free to see the flag clears it and
+ * hands its block to the heap instead, which gets the page re-queued. The
+ * flag is only ever set while the list is empty. */
+#define TS_TF_FULL ((uintptr_t)1)
+
 /* Set up an in-use page to hold blocks of `block_size` (a size class size). */
 void ts_page_init(ts_page_t *page, size_t block_size);
 
@@ -30,21 +37,34 @@ TS_INLINE uint8_t *ts_page_block_at(const ts_page_t *page, size_t i) {
     return ts_page_start(seg, page) + i * page->block_size;
 }
 
+/* Owner only: move blocks other threads freed into `free`. Returns how many. */
+size_t ts_page_collect(ts_page_t *page);
+
+/* ts_page_alloc once `free` is empty: remote frees first, then new blocks. */
+void *ts_page_alloc_slow(ts_page_t *page);
+
 /* A block from this page, or NULL when every block is in use. */
 TS_INLINE void *ts_page_alloc(ts_page_t *page) {
     ts_block_t *b = page->free;
-    if (ts_unlikely(b == NULL)) {
-        if (page->reserved == page->capacity)
-            return NULL;
-        ts_page_extend(page);
-        b = page->free;
-    }
+    if (ts_unlikely(b == NULL))
+        return ts_page_alloc_slow(page);
     page->free = b->next;
     page->used++;
     return b;
 }
 
-/* Return a block that came from ts_page_alloc on this page. */
+/* Owner only, after ts_page_alloc returned NULL: flag the page full before
+ * taking it off its queue. Fails (returns 0) if a remote free slipped in
+ * since, in which case the page has blocks again. */
+TS_INLINE int ts_page_mark_full(ts_page_t *page) {
+    uintptr_t expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&page->thread_free, &expected, TS_TF_FULL,
+                                                memory_order_relaxed, memory_order_relaxed))
+        return 1;
+    return expected == TS_TF_FULL; /* still flagged from the last time */
+}
+
+/* Return a block that came from ts_page_alloc on this page. Owner only. */
 TS_INLINE void ts_page_free(ts_page_t *page, void *p) {
     ts_block_t *b = p;
     b->next = page->free;

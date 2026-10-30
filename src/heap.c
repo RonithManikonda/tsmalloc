@@ -2,7 +2,7 @@
 
 void ts_heap_init(ts_heap_t *heap) {
     *heap = (ts_heap_t){0};
-    pthread_mutex_init(&heap->remote_lock, NULL);
+    atomic_init(&heap->delayed_free, NULL);
 }
 
 static void queue_push_front(ts_page_queue_t *q, ts_page_t *page) {
@@ -83,8 +83,10 @@ TS_INLINE void *queue_alloc(ts_page_queue_t *q) {
         void *p = ts_page_alloc(page);
         if (ts_likely(p != NULL))
             return p;
-        /* Full: drop it from the queue until one of its blocks is freed. */
-        queue_remove(q, page);
+        /* Full: drop it from the queue until one of its blocks is freed,
+         * unless a remote free arrived meanwhile. Then try it again. */
+        if (ts_page_mark_full(page))
+            queue_remove(q, page);
     }
     return NULL;
 }
@@ -95,9 +97,9 @@ void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls) {
     if (ts_likely(p != NULL))
         return p;
 
-    /* Take back remote frees before reaching for a fresh page. A thread
-     * whose blocks are all freed elsewhere (a producer) would otherwise
-     * never see its pages empty and keep growing. */
+    /* Take back remote frees into full pages before reaching for a fresh
+     * one. A thread whose blocks are all freed elsewhere (a producer) would
+     * otherwise never see its full pages again and keep growing. */
     if (ts_heap_collect_remote(heap) > 0 && (p = queue_alloc(q)) != NULL)
         return p;
 
@@ -127,24 +129,42 @@ void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, voi
         queue_push_front(q, page);
 }
 
-void ts_heap_free_remote(ts_heap_t *heap, void *p) {
+void ts_heap_free_remote(ts_heap_t *heap, ts_page_t *page, void *p) {
     ts_block_t *b = p;
-    pthread_mutex_lock(&heap->remote_lock);
-    b->next = atomic_load_explicit(&heap->remote_free, memory_order_relaxed);
-    atomic_store_explicit(&heap->remote_free, b, memory_order_relaxed);
-    pthread_mutex_unlock(&heap->remote_lock);
+    uintptr_t old = atomic_load_explicit(&page->thread_free, memory_order_relaxed);
+    for (;;) {
+        if (ts_unlikely(old == TS_TF_FULL)) {
+            /* The owner has forgotten this page. Clear the flag and send the
+             * block through the heap; whoever clears it does that once, and
+             * pushes after us go to the page as normal. */
+            if (atomic_compare_exchange_weak_explicit(&page->thread_free, &old, 0,
+                                                      memory_order_relaxed, memory_order_relaxed))
+                break;
+            continue;
+        }
+        b->next = (ts_block_t *)old;
+        /* Release: the owner's acquire in ts_page_collect must see b->next.
+         * After this succeeds the block, and maybe the whole page, may be
+         * reused or unmapped at once, so nothing below touches them. */
+        if (atomic_compare_exchange_weak_explicit(&page->thread_free, &old, (uintptr_t)b,
+                                                  memory_order_release, memory_order_relaxed))
+            return;
+    }
+
+    /* The block isn't counted free yet, so its page and segment stay put
+     * until the owner gets to it. Heaps are never unmapped. */
+    ts_block_t *head = atomic_load_explicit(&heap->delayed_free, memory_order_relaxed);
+    do {
+        b->next = head;
+    } while (!atomic_compare_exchange_weak_explicit(&heap->delayed_free, &head, b,
+                                                    memory_order_release, memory_order_relaxed));
 }
 
 size_t ts_heap_collect_remote(ts_heap_t *heap) {
-    /* Unlocked peek, so the common case of nothing to collect costs one
-     * load. A push that lands just after it is picked up next time. The
-     * blocks' `next` links are only read after taking the lock, which is
-     * what orders them after the pushes. */
-    if (atomic_load_explicit(&heap->remote_free, memory_order_relaxed) == NULL)
+    /* Peek first so the common case of nothing to collect is one load. */
+    if (atomic_load_explicit(&heap->delayed_free, memory_order_relaxed) == NULL)
         return 0;
-    pthread_mutex_lock(&heap->remote_lock);
-    ts_block_t *b = atomic_exchange_explicit(&heap->remote_free, NULL, memory_order_relaxed);
-    pthread_mutex_unlock(&heap->remote_lock);
+    ts_block_t *b = atomic_exchange_explicit(&heap->delayed_free, NULL, memory_order_acquire);
 
     size_t n = 0;
     while (b != NULL) {
