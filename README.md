@@ -22,10 +22,11 @@ enough to explain end to end:
 
 ## Status
 
-Early days. Small sizes (up to 16 KiB) now come from pages in 4 MiB segments, through one global
-heap with a page queue per size class. That heap sits behind a single mutex: thread-safe, but
-deliberately naive. It's the baseline the thread-local design will be measured against. Larger sizes get
-their own `mmap`'d region. There are no per-block headers: `ts_free` masks the pointer to find its
+Early days. Small sizes (up to 16 KiB) come from pages in 4 MiB segments. Every thread gets its own
+heap, with a page queue per size class, on its first malloc. Allocating and freeing your own blocks
+takes no lock. A block freed by another thread goes onto its owner's remote list (still behind a
+per-heap mutex for now), and the owner takes those back when it runs out of free blocks. Heaps of
+exited threads aren't reclaimed yet. Larger sizes get their own `mmap`'d region. There are no per-block headers: `ts_free` masks the pointer to find its
 segment or mapping and reads the block size from there.
 
 Benchmarks and the first numbers against macOS libmalloc are in

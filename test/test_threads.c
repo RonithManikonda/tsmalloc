@@ -4,7 +4,7 @@
 
 #include <pthread.h>
 
-/* Smoke tests for the locked global heap: many threads allocating, writing,
+/* Smoke tests for the thread-local heaps: many threads allocating, writing,
  * verifying and freeing at once, plus blocks freed by a different thread
  * than the one that allocated them. TS_TEST_SCALE multiplies the work. */
 

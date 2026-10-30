@@ -22,7 +22,6 @@
 #include "os.h"
 
 #include <errno.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -35,27 +34,46 @@ typedef struct {
 
 _Static_assert(sizeof(ts_large_t) == TS_ALIGN, "large header keeps user pointers aligned");
 
-/* One heap shared by every thread, behind one lock. This is the simple
- * design the thread-local heaps will be measured against; large blocks
- * only touch mmap/munmap and stay outside the lock. */
-static ts_heap_t global_heap;
-static pthread_mutex_t global_lock = PTHREAD_MUTEX_INITIALIZER;
+/* The calling thread's heap, created on its first small malloc. Its memory
+ * comes straight from the OS layer: allocating it with malloc would recurse
+ * once tsmalloc is malloc.
+ *
+ * Heaps aren't released yet when their thread exits; the heap and its
+ * segments stay, and other threads' frees into it pile up on its remote
+ * list. Abandoning and adopting them comes later. */
+static _Thread_local ts_heap_t *tl_heap;
+
+static TS_NOINLINE ts_heap_t *heap_create(void) {
+    ts_heap_t *heap = ts_os_alloc(sizeof *heap);
+    if (heap == NULL)
+        return NULL; /* errno is ENOMEM */
+    ts_heap_init(heap);
+    tl_heap = heap;
+    return heap;
+}
 
 static void *small_alloc_class(unsigned cls) {
-    pthread_mutex_lock(&global_lock);
-    void *p = ts_heap_malloc_class(&global_heap, cls);
-    pthread_mutex_unlock(&global_lock);
-    return p;
+    ts_heap_t *heap = tl_heap;
+    if (ts_unlikely(heap == NULL)) {
+        heap = heap_create();
+        if (heap == NULL)
+            return NULL;
+    }
+    return ts_heap_malloc_class(heap, cls);
 }
 
 TS_INLINE void *small_alloc(size_t size) {
     return small_alloc_class(ts_size_to_class(size));
 }
 
+/* A thread that never allocated has no heap, so tl_heap is NULL and any
+ * block it frees takes the remote path, as it should. */
 static void small_free(ts_segment_t *seg, void *p) {
-    pthread_mutex_lock(&global_lock);
-    ts_heap_free_small(&global_heap, seg, ts_ptr_page(seg, p), p);
-    pthread_mutex_unlock(&global_lock);
+    ts_heap_t *owner = seg->heap;
+    if (ts_likely(owner == tl_heap))
+        ts_heap_free_small(owner, seg, ts_ptr_page(seg, p), p);
+    else
+        ts_heap_free_remote(owner, p);
 }
 
 TS_INLINE void *region_of(const void *p) {

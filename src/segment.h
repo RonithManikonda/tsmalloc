@@ -45,6 +45,10 @@ struct ts_page_s {
 
 struct ts_segment_s {
     uint32_t kind;      /* TS_KIND_SEGMENT */
+    /* Heap that allocates from this segment. Set once when the heap creates
+     * the segment and read by any thread that frees one of its blocks; the
+     * block's own handoff between threads orders that read after the write. */
+    ts_heap_t *heap;
     ts_segment_t *next; /* links for whoever owns the segment */
     ts_segment_t *prev;
     uint32_t used_pages;
