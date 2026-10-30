@@ -32,6 +32,7 @@ typedef struct {
 } ts_page_queue_t;
 
 struct ts_heap_s {
+    uintptr_t thread_id;    /* owner's ts_thread_id(), 0 for a heap no thread owns */
     ts_page_queue_t pages[TS_NUM_CLASSES];
     ts_segment_t *segments; /* every segment this heap owns */
 
@@ -40,7 +41,7 @@ struct ts_heap_s {
     _Atomic(ts_block_t *) delayed_free;
 };
 
-/* Set up an empty heap. */
+/* Set up an empty heap with no owning thread. */
 void ts_heap_init(ts_heap_t *heap);
 
 /* Block of at least `size` bytes (size <= TS_SMALL_MAX), or NULL with errno

@@ -55,6 +55,7 @@ static ts_page_t *page_fresh(ts_heap_t *heap, unsigned cls) {
         if (seg == NULL)
             return NULL;
         seg->heap = heap;
+        atomic_store_explicit(&seg->thread_id, heap->thread_id, memory_order_relaxed);
         segment_link(heap, seg);
         page = ts_segment_page_alloc(seg);
     }

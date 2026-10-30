@@ -40,7 +40,9 @@ _Static_assert(sizeof(ts_large_t) == TS_ALIGN, "large header keeps user pointers
  *
  * Heaps aren't released yet when their thread exits; the heap and its
  * segments stay, and other threads' frees into it pile up on its pages'
- * remote lists. Abandoning and adopting them comes later. */
+ * remote lists. Abandoning and adopting them comes later. Until then a new
+ * thread that inherits a dead thread's id also inherits its segments as
+ * far as free is concerned, which is harmless: nobody else owns them. */
 static _Thread_local ts_heap_t *tl_heap;
 
 static TS_NOINLINE ts_heap_t *heap_create(void) {
@@ -48,6 +50,7 @@ static TS_NOINLINE ts_heap_t *heap_create(void) {
     if (heap == NULL)
         return NULL; /* errno is ENOMEM */
     ts_heap_init(heap);
+    heap->thread_id = ts_thread_id();
     tl_heap = heap;
     return heap;
 }
@@ -66,14 +69,18 @@ TS_INLINE void *small_alloc(size_t size) {
     return small_alloc_class(ts_size_to_class(size));
 }
 
-/* A thread that never allocated has no heap, so tl_heap is NULL and any
- * block it frees takes the remote path, as it should. */
+/* Local or remote is decided by the thread id stored in the segment rather
+ * than by comparing heaps: the id is one register read away, while tl_heap
+ * may cost a call into the TLS machinery (it does on macOS). A thread that
+ * never allocated owns no segment, so its frees all take the remote path,
+ * as they should. Relaxed is enough: only this thread ever stores its own
+ * id into a segment, so the comparison can't succeed spuriously. */
 static void small_free(ts_segment_t *seg, void *p) {
-    ts_heap_t *owner = seg->heap;
-    if (ts_likely(owner == tl_heap))
-        ts_heap_free_small(owner, seg, ts_ptr_page(seg, p), p);
+    ts_page_t *page = ts_ptr_page(seg, p);
+    if (ts_likely(atomic_load_explicit(&seg->thread_id, memory_order_relaxed) == ts_thread_id()))
+        ts_heap_free_small(seg->heap, seg, page, p);
     else
-        ts_heap_free_remote(owner, ts_ptr_page(seg, p), p);
+        ts_heap_free_remote(seg->heap, page, p);
 }
 
 TS_INLINE void *region_of(const void *p) {

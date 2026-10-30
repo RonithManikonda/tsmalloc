@@ -47,3 +47,48 @@ TEST(segment_mask_finds_segment_start) {
     CHECK_EQ((seg + TS_SEGMENT_SIZE - 1) & ~(uintptr_t)TS_SEGMENT_MASK, seg);
     CHECK_EQ(((seg + 3 * TS_PAGE_SIZE + 9) - seg) >> TS_PAGE_SHIFT, 3);
 }
+
+/* ---- ts_thread_id ---------------------------------------------------------- */
+
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+
+enum { ID_THREADS = 8 };
+static uintptr_t seen_ids[ID_THREADS];
+static _Atomic int arrived; /* no pthread_barrier_t on macOS */
+
+static void *record_id(void *arg) {
+    size_t i = (size_t)(uintptr_t)arg;
+    seen_ids[i] = ts_thread_id();
+    /* Stay alive until everyone has recorded theirs: ids are only unique
+     * among threads that exist at the same time. */
+    atomic_fetch_add(&arrived, 1);
+    while (atomic_load(&arrived) < ID_THREADS)
+        sched_yield();
+    return NULL;
+}
+
+TEST(thread_id_is_stable_and_nonzero) {
+    uintptr_t a = ts_thread_id();
+    CHECK(a != 0);
+    CHECK_EQ(ts_thread_id(), a);
+#if defined(__APPLE__) || (defined(__linux__) && defined(__x86_64__))
+    /* On these targets it is pthread_self() read without the call. */
+    CHECK_EQ(a, (uintptr_t)pthread_self());
+#endif
+}
+
+TEST(thread_id_differs_between_live_threads) {
+    pthread_t t[ID_THREADS];
+    for (size_t i = 0; i < ID_THREADS; i++)
+        REQUIRE(pthread_create(&t[i], NULL, record_id, (void *)(uintptr_t)i) == 0);
+    for (size_t i = 0; i < ID_THREADS; i++)
+        pthread_join(t[i], NULL);
+    for (size_t i = 0; i < ID_THREADS; i++) {
+        CHECK(seen_ids[i] != 0);
+        CHECK(seen_ids[i] != ts_thread_id());
+        for (size_t j = i + 1; j < ID_THREADS; j++)
+            CHECK(seen_ids[i] != seen_ids[j]);
+    }
+}

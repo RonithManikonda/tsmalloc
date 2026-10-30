@@ -50,6 +50,12 @@ struct ts_page_s {
 
 struct ts_segment_s {
     uint32_t kind;      /* TS_KIND_SEGMENT */
+    /* ts_thread_id() of the thread whose heap owns the segment, or 0 when
+     * no live thread does. free compares it with its own id: equal means
+     * the block is local and goes straight back on its page. Only the
+     * owner ever stores its own id here, so a thread can't see its id by
+     * mistake; other threads just see "not mine". */
+    _Atomic uintptr_t thread_id;
     /* Heap that allocates from this segment. Set once when the heap creates
      * the segment and read by any thread that frees one of its blocks; the
      * block's own handoff between threads orders that read after the write. */

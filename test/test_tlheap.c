@@ -266,3 +266,44 @@ TEST(stress_owner_allocates_while_others_free) {
     CHECK(count_segments(owner_of(p)) <= 2);
     ts_free(p);
 }
+
+/* Segments record the owning thread, which is what free uses to tell local
+ * from remote. */
+static void *report_thread_id(void *arg) {
+    (void)arg;
+    return (void *)ts_thread_id();
+}
+
+TEST(segment_records_owner_thread) {
+    void *p = ts_malloc(48);
+    REQUIRE(p != NULL);
+    ts_segment_t *seg = ts_ptr_segment(p);
+    CHECK_EQ(atomic_load(&seg->thread_id), ts_thread_id());
+    CHECK_EQ(seg->heap->thread_id, ts_thread_id());
+
+    pthread_t t;
+    void *other;
+    REQUIRE(pthread_create(&t, NULL, report_thread_id, NULL) == 0);
+    pthread_join(t, &other);
+    CHECK((uintptr_t)other != atomic_load(&seg->thread_id));
+    ts_free(p);
+}
+
+/* A heap nobody owns (built by hand, as tests do) gets segments with owner
+ * 0, so even its creator's ts_free treats the blocks as remote. */
+TEST(unowned_heap_blocks_take_remote_path) {
+    ts_heap_t heap;
+    ts_heap_init(&heap);
+    void *p = ts_heap_malloc_small(&heap, 64);
+    REQUIRE(p != NULL);
+    ts_segment_t *seg = ts_ptr_segment(p);
+    ts_page_t *page = ts_ptr_page(seg, p);
+    CHECK_EQ(atomic_load(&seg->thread_id), 0);
+    ts_free(p);
+    /* Still counted used: it waits on the page's remote list. */
+    CHECK_EQ(page->used, 1);
+    CHECK(atomic_load(&page->thread_free) == (uintptr_t)p);
+    CHECK_EQ(ts_page_collect(page), 1);
+    CHECK_EQ(page->used, 0);
+    release_all(&heap);
+}

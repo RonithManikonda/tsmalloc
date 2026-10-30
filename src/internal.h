@@ -62,6 +62,43 @@ TS_INLINE unsigned ts_bsr(size_t x) {
     return (unsigned)(63 - __builtin_clzll((unsigned long long)x));
 }
 
+/* ---- Thread identity -------------------------------------------------------
+ *
+ * A cheap id for the calling thread, unique among live threads and never 0,
+ * so 0 can mean "no owner". Where we know the layout we read the thread's
+ * own self pointer straight out of its TLS block (what pthread_self()
+ * returns), which is a single load; elsewhere we call pthread_self().
+ *
+ *   - Darwin arm64: TPIDRRO_EL0 points at the TSD array (low 3 bits hold the
+ *     CPU number); slot 0 is the pthread_t.
+ *   - glibc x86-64: %fs:0 is the TCB's pointer to itself, i.e. pthread_self().
+ *   - Linux arm64: the thread pointer register is per-thread TLS base.
+ *
+ * Ids get reused once a thread is gone, so anything keyed on them has to
+ * forget a thread when it exits. */
+#if defined(__APPLE__) && defined(__aarch64__)
+TS_INLINE uintptr_t ts_thread_id(void) {
+    uintptr_t tsd;
+    __asm__("mrs %0, tpidrro_el0" : "=r"(tsd));
+    return ((const uintptr_t *)(tsd & ~(uintptr_t)7))[0];
+}
+#elif defined(__linux__) && defined(__x86_64__)
+TS_INLINE uintptr_t ts_thread_id(void) {
+    uintptr_t self;
+    __asm__("movq %%fs:0, %0" : "=r"(self));
+    return self;
+}
+#elif defined(__linux__) && defined(__aarch64__)
+TS_INLINE uintptr_t ts_thread_id(void) {
+    return (uintptr_t)__builtin_thread_pointer();
+}
+#else
+#include <pthread.h>
+TS_INLINE uintptr_t ts_thread_id(void) {
+    return (uintptr_t)pthread_self();
+}
+#endif
+
 /* ---- Core types (defined as each part is written) -------------------------- */
 typedef struct ts_block_s   ts_block_t;
 typedef struct ts_page_s    ts_page_t;
