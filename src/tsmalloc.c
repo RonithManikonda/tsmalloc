@@ -22,6 +22,7 @@
 #include "os.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -38,12 +39,28 @@ _Static_assert(sizeof(ts_large_t) == TS_ALIGN, "large header keeps user pointers
  * comes straight from the OS layer: allocating it with malloc would recurse
  * once tsmalloc is malloc.
  *
- * Heaps aren't released yet when their thread exits; the heap and its
- * segments stay, and other threads' frees into it pile up on its pages'
- * remote lists. Abandoning and adopting them comes later. Until then a new
- * thread that inherits a dead thread's id also inherits its segments as
- * far as free is concerned, which is harmless: nobody else owns them. */
+ * The heap is also stored under a pthread key, whose destructor abandons it
+ * when the thread exits (see ts_heap_abandon). The key only exists for the
+ * destructor; lookups go through tl_heap. */
 static _Thread_local ts_heap_t *tl_heap;
+
+static pthread_key_t heap_key;
+static pthread_once_t heap_key_once = PTHREAD_ONCE_INIT;
+static int heap_key_ok;
+
+static void heap_thread_exit(void *arg) {
+    ts_heap_t *heap = arg;
+    /* Other destructors may still run after us and malloc or free. Their
+     * mallocs get a fresh heap (and a fresh key value, so we're called
+     * again); their frees of our blocks see owner 0 and go remote. */
+    tl_heap = NULL;
+    ts_heap_abandon(heap);
+    ts_os_free(heap, sizeof *heap);
+}
+
+static void heap_key_create(void) {
+    heap_key_ok = pthread_key_create(&heap_key, heap_thread_exit) == 0;
+}
 
 static TS_NOINLINE ts_heap_t *heap_create(void) {
     ts_heap_t *heap = ts_os_alloc(sizeof *heap);
@@ -52,6 +69,11 @@ static TS_NOINLINE ts_heap_t *heap_create(void) {
     ts_heap_init(heap);
     heap->thread_id = ts_thread_id();
     tl_heap = heap;
+    /* If the key can't be set the heap just outlives its thread, as all
+     * heaps used to: a leak, not a crash. */
+    pthread_once(&heap_key_once, heap_key_create);
+    if (heap_key_ok)
+        (void)pthread_setspecific(heap_key, heap);
     return heap;
 }
 
@@ -80,7 +102,7 @@ static void small_free(ts_segment_t *seg, void *p) {
     if (ts_likely(atomic_load_explicit(&seg->thread_id, memory_order_relaxed) == ts_thread_id()))
         ts_heap_free_small(seg->heap, seg, page, p);
     else
-        ts_heap_free_remote(seg->heap, page, p);
+        ts_heap_free_remote(seg, page, p);
 }
 
 TS_INLINE void *region_of(const void *p) {

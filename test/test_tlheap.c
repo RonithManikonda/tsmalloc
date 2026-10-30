@@ -71,19 +71,19 @@ static void release_all(ts_heap_t *heap) {
     }
 }
 
-static void free_remote(ts_heap_t *heap, void *p) {
-    ts_heap_free_remote(heap, ts_ptr_page(ts_ptr_segment(p), p), p);
+static void free_remote(void *p) {
+    ts_segment_t *seg = ts_ptr_segment(p);
+    ts_heap_free_remote(seg, ts_ptr_page(seg, p), p);
 }
 
 typedef struct {
-    ts_heap_t *heap;
     size_t from, to;
 } remote_job_t;
 
 static void *free_remotely(void *arg) {
     remote_job_t *j = arg;
     for (size_t i = j->from; i < j->to; i++)
-        free_remote(j->heap, blocks[i]);
+        free_remote(blocks[i]);
     return NULL;
 }
 
@@ -96,7 +96,7 @@ TEST(remote_frees_are_reused_without_new_pages) {
     }
     size_t pages = used_pages(&heap);
     /* Two threads free the second half at once. */
-    remote_job_t jobs[2] = {{&heap, N / 2, 3 * N / 4}, {&heap, 3 * N / 4, N}};
+    remote_job_t jobs[2] = {{N / 2, 3 * N / 4}, {3 * N / 4, N}};
     pthread_t t[2];
     for (int i = 0; i < 2; i++)
         REQUIRE(pthread_create(&t[i], NULL, free_remotely, &jobs[i]) == 0);
@@ -129,7 +129,7 @@ TEST(remote_frees_are_reused_without_new_pages) {
 }
 
 static void *free_one(void *p) {
-    free_remote(ts_ptr_segment(p)->heap, p);
+    free_remote(p);
     return NULL;
 }
 

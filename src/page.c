@@ -12,12 +12,12 @@ void ts_page_init(ts_page_t *page, size_t block_size) {
 }
 
 size_t ts_page_collect(ts_page_t *page) {
-    if ((atomic_load_explicit(&page->thread_free, memory_order_relaxed) & ~TS_TF_FULL) == 0)
+    if ((atomic_load_explicit(&page->thread_free, memory_order_relaxed) & ~TS_TF_FLAGS) == 0)
         return 0;
-    /* Take the whole list, keep the flag. Acquire pairs with the release
+    /* Take the whole list, keep the flags. Acquire pairs with the release
      * CAS in ts_heap_free_remote, so the pushers' `next` links are visible. */
-    uintptr_t tf = atomic_fetch_and_explicit(&page->thread_free, TS_TF_FULL, memory_order_acquire);
-    ts_block_t *head = (ts_block_t *)(tf & ~TS_TF_FULL);
+    uintptr_t tf = atomic_fetch_and_explicit(&page->thread_free, TS_TF_FLAGS, memory_order_acquire);
+    ts_block_t *head = (ts_block_t *)(tf & ~TS_TF_FLAGS);
 
     /* Walking the list costs one load per block, but `used` needs the count
      * anyway and the blocks are about to be reused. */

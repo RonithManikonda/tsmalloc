@@ -18,12 +18,21 @@
  * a quarter of one on Apple silicon; either way small next to the page. */
 #define TS_PAGE_EXTEND_BYTES ((size_t)4096)
 
-/* Flag in page->thread_free (blocks are 16-aligned, so the low bit is free):
- * the page was full and the owner took it off its queue, so it won't look
- * at thread_free again. The first remote free to see the flag clears it and
- * hands its block to the heap instead, which gets the page re-queued. The
- * flag is only ever set while the list is empty. */
-#define TS_TF_FULL ((uintptr_t)1)
+/* Flags in the low bits of page->thread_free (blocks are 16-aligned).
+ *
+ * TS_TF_FULL: the page was full and the owner took it off its queue, so it
+ * won't look at thread_free again. The first remote free to see the flag
+ * swaps it for TS_TF_BUSY and hands its block to the heap instead, which
+ * gets the page re-queued.
+ *
+ * TS_TF_BUSY: a remote freer is pushing onto the heap's delayed list. While
+ * it is set other freers wait, and the owner doesn't free delayed blocks of
+ * this page or give up the heap, so the freer may still touch both.
+ *
+ * Either flag is only ever set while the list is empty, and never both. */
+#define TS_TF_FULL  ((uintptr_t)1)
+#define TS_TF_BUSY  ((uintptr_t)2)
+#define TS_TF_FLAGS (TS_TF_FULL | TS_TF_BUSY)
 
 /* Set up an in-use page to hold blocks of `block_size` (a size class size). */
 void ts_page_init(ts_page_t *page, size_t block_size);
@@ -55,11 +64,13 @@ TS_INLINE void *ts_page_alloc(ts_page_t *page) {
 
 /* Owner only, after ts_page_alloc returned NULL: flag the page full before
  * taking it off its queue. Fails (returns 0) if a remote free slipped in
- * since, in which case the page has blocks again. */
+ * since, in which case the page has blocks again, or one is still busy
+ * handing a block to the heap; either way the caller just tries the page
+ * again. Release so a freer that sees the flag also sees seg->heap. */
 TS_INLINE int ts_page_mark_full(ts_page_t *page) {
     uintptr_t expected = 0;
     if (atomic_compare_exchange_strong_explicit(&page->thread_free, &expected, TS_TF_FULL,
-                                                memory_order_relaxed, memory_order_relaxed))
+                                                memory_order_release, memory_order_relaxed))
         return 1;
     return expected == TS_TF_FULL; /* still flagged from the last time */
 }

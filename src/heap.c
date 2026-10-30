@@ -1,5 +1,8 @@
 #include "heap.h"
 
+#include <pthread.h>
+#include <sched.h>
+
 void ts_heap_init(ts_heap_t *heap) {
     *heap = (ts_heap_t){0};
     atomic_init(&heap->delayed_free, NULL);
@@ -130,16 +133,25 @@ void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, voi
         queue_push_front(q, page);
 }
 
-void ts_heap_free_remote(ts_heap_t *heap, ts_page_t *page, void *p) {
+void ts_heap_free_remote(ts_segment_t *seg, ts_page_t *page, void *p) {
     ts_block_t *b = p;
     uintptr_t old = atomic_load_explicit(&page->thread_free, memory_order_relaxed);
     for (;;) {
+        if (ts_unlikely(old & TS_TF_BUSY)) {
+            /* Someone is handing a block of this page to the heap. That is
+             * a handful of instructions; wait rather than queue behind. */
+            sched_yield();
+            old = atomic_load_explicit(&page->thread_free, memory_order_relaxed);
+            continue;
+        }
         if (ts_unlikely(old == TS_TF_FULL)) {
-            /* The owner has forgotten this page. Clear the flag and send the
-             * block through the heap; whoever clears it does that once, and
-             * pushes after us go to the page as normal. */
-            if (atomic_compare_exchange_weak_explicit(&page->thread_free, &old, 0,
-                                                      memory_order_relaxed, memory_order_relaxed))
+            /* The owner has forgotten this page. Swap the flag for BUSY and
+             * send the block through the heap; whoever wins this does that
+             * once, and pushes after us go to the page as normal. Acquire
+             * pairs with the release in ts_page_mark_full: seg->heap is
+             * the heap that flagged the page. */
+            if (atomic_compare_exchange_weak_explicit(&page->thread_free, &old, TS_TF_BUSY,
+                                                      memory_order_acquire, memory_order_relaxed))
                 break;
             continue;
         }
@@ -152,13 +164,25 @@ void ts_heap_free_remote(ts_heap_t *heap, ts_page_t *page, void *p) {
             return;
     }
 
-    /* The block isn't counted free yet, so its page and segment stay put
-     * until the owner gets to it. Heaps are never unmapped. */
+    /* While BUSY is set the owner neither frees this block (it waits in
+     * ts_heap_collect_remote) nor abandons the heap, so both stay put. */
+    ts_heap_t *heap = seg->heap;
     ts_block_t *head = atomic_load_explicit(&heap->delayed_free, memory_order_relaxed);
     do {
         b->next = head;
     } while (!atomic_compare_exchange_weak_explicit(&heap->delayed_free, &head, b,
                                                     memory_order_release, memory_order_relaxed));
+    /* Release: whoever sees BUSY clear also sees the push above. */
+    atomic_fetch_and_explicit(&page->thread_free, ~TS_TF_BUSY, memory_order_release);
+}
+
+/* Wait until no remote freer is between flagging `page` BUSY and clearing
+ * it again. Acquire, so its push to delayed_free is visible afterwards. */
+static uintptr_t wait_not_busy(ts_page_t *page) {
+    uintptr_t tf;
+    while ((tf = atomic_load_explicit(&page->thread_free, memory_order_acquire)) & TS_TF_BUSY)
+        sched_yield();
+    return tf;
 }
 
 size_t ts_heap_collect_remote(ts_heap_t *heap) {
@@ -171,9 +195,94 @@ size_t ts_heap_collect_remote(ts_heap_t *heap) {
     while (b != NULL) {
         ts_block_t *next = b->next;
         ts_segment_t *seg = ts_ptr_segment(b);
-        ts_heap_free_small(heap, seg, ts_ptr_page(seg, b), b);
+        ts_page_t *page = ts_ptr_page(seg, b);
+        /* The freer may not have cleared BUSY yet. Freeing the block could
+         * retire the page, so let it finish first. */
+        wait_not_busy(page);
+        ts_heap_free_small(heap, seg, page, b);
         b = next;
         n++;
     }
     return n;
+}
+
+/* ---- Abandonment -------------------------------------------------------- */
+
+static pthread_mutex_t abandoned_lock = PTHREAD_MUTEX_INITIALIZER;
+static ts_segment_t *abandoned; /* linked through next/prev */
+static size_t abandoned_count;
+
+/* Clear TS_TF_FULL so remote frees into the page go to its thread_free list
+ * from now on, never to the heap. */
+static void page_stop_delayed(ts_page_t *page) {
+    uintptr_t old = wait_not_busy(page);
+    while (old & TS_TF_FULL) {
+        /* FULL is only set on an empty list, so this is FULL -> 0. A freer
+         * that wins the race to BUSY first makes us wait for it. */
+        if (atomic_compare_exchange_weak_explicit(&page->thread_free, &old, old & ~TS_TF_FULL,
+                                                  memory_order_acquire, memory_order_relaxed))
+            return;
+        if (old & TS_TF_BUSY)
+            old = wait_not_busy(page);
+    }
+}
+
+void ts_heap_abandon(ts_heap_t *heap) {
+    /* 1. Close the delayed path, then 2. drain it. After step 1 no freer
+     *    can reach the heap, so after 2 nothing is left on it. */
+    for (ts_segment_t *seg = heap->segments; seg != NULL; seg = seg->next)
+        for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++)
+            if (seg->pages[i].in_use)
+                page_stop_delayed(&seg->pages[i]);
+    ts_heap_collect_remote(heap);
+
+    /* 3. Take in remote frees, release empty pages and segments, abandon
+     *    the rest. Frees that race with this land on thread_free and wait
+     *    there for whoever adopts the segment. */
+    ts_segment_t *next;
+    for (ts_segment_t *seg = heap->segments; seg != NULL; seg = next) {
+        next = seg->next;
+        for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++) {
+            ts_page_t *page = &seg->pages[i];
+            if (!page->in_use)
+                continue;
+            ts_page_collect(page);
+            page->queued = 0;
+            page->next = page->prev = NULL;
+            if (ts_page_is_empty(page))
+                ts_segment_page_free(seg, page);
+        }
+        if (seg->used_pages == 0) {
+            ts_segment_free(seg);
+            continue;
+        }
+        seg->heap = NULL;
+        /* From here on frees by our thread (say, from a later TLS
+         * destructor) are remote too, and a new thread that reuses our id
+         * doesn't mistake the segment for its own. */
+        atomic_store_explicit(&seg->thread_id, 0, memory_order_relaxed);
+        pthread_mutex_lock(&abandoned_lock);
+        seg->prev = NULL;
+        seg->next = abandoned;
+        if (abandoned != NULL)
+            abandoned->prev = seg;
+        abandoned = seg;
+        abandoned_count++;
+        pthread_mutex_unlock(&abandoned_lock);
+    }
+    ts_heap_init(heap);
+}
+
+size_t ts_abandoned_count(void) {
+    pthread_mutex_lock(&abandoned_lock);
+    size_t n = abandoned_count;
+    pthread_mutex_unlock(&abandoned_lock);
+    return n;
+}
+
+void ts_abandoned_visit(void (*fn)(ts_segment_t *seg, void *arg), void *arg) {
+    pthread_mutex_lock(&abandoned_lock);
+    for (ts_segment_t *seg = abandoned; seg != NULL; seg = seg->next)
+        fn(seg, arg);
+    pthread_mutex_unlock(&abandoned_lock);
 }

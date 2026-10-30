@@ -26,6 +26,11 @@
  * When the owner runs out of blocks it frees that list locally, which puts
  * those pages back on their queues. Later remote frees into them go to
  * `thread_free` as usual.
+ *
+ * When the owning thread exits, its heap is abandoned: everything that can
+ * be freed is, and segments that still hold live blocks go onto a global
+ * abandoned list with owner 0. Frees into them keep landing on their pages'
+ * `thread_free` lists until another thread adopts them.
  */
 typedef struct {
     ts_page_t *head;
@@ -55,12 +60,24 @@ void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls);
  * Only the heap's owner may call this. */
 void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, void *p);
 
-/* Return a block of `heap` from any thread other than its owner. Lock-free. */
-void ts_heap_free_remote(ts_heap_t *heap, ts_page_t *page, void *p);
+/* Return a block of `seg` from any thread other than its owner (or when it
+ * has none). Lock-free, except for waiting out another freer that is busy
+ * handing a block of the same page to the heap. */
+void ts_heap_free_remote(ts_segment_t *seg, ts_page_t *page, void *p);
 
 /* Owner only: free the blocks on `delayed_free`, re-queueing their pages.
  * Returns how many there were. ts_heap_malloc_class calls this itself
  * before reaching for a fresh page. */
 size_t ts_heap_collect_remote(ts_heap_t *heap);
+
+/* Owner only, as its thread exits: give everything back that can be given
+ * back and abandon the rest. The heap is empty afterwards (and no other
+ * thread will touch it again, so it may be unmapped). */
+void ts_heap_abandon(ts_heap_t *heap);
+
+/* Number of abandoned segments, and a way for tests to look at them. The
+ * callback runs with the abandoned list locked. */
+size_t ts_abandoned_count(void);
+void ts_abandoned_visit(void (*fn)(ts_segment_t *seg, void *arg), void *arg);
 
 #endif /* TS_HEAP_H */

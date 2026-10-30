@@ -37,7 +37,8 @@ struct ts_page_s {
     uint32_t block_size;
     ts_block_t *free;    /* blocks ready to hand out */
     /* Blocks freed by other threads, pushed lock-free; the owner splices
-     * them into `free` when it runs dry. The low bit is TS_TF_FULL. */
+     * them into `free` when it runs dry. The low two bits are flags
+     * (TS_TF_FULL, TS_TF_BUSY in page.h). */
     _Atomic uintptr_t thread_free;
     ts_page_t *next;     /* page queue links */
     ts_page_t *prev;
