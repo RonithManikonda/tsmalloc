@@ -21,3 +21,8 @@ ts_add_test(test_tlheap)
 ts_add_test(test_abandon)
 ts_add_test(test_bench)
 target_compile_definitions(test_bench PRIVATE _POSIX_C_SOURCE=200809L)
+
+# Long-running multithreaded stress; `ctest -L stress` runs just these, and
+# TS_TEST_SCALE=<n> in the environment makes them n times longer.
+ts_add_test(test_stress)
+set_tests_properties(test_stress PROPERTIES LABELS stress)
