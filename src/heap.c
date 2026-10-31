@@ -107,6 +107,12 @@ void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls) {
     if (ts_heap_collect_remote(heap) > 0 && (p = queue_alloc(q)) != NULL)
         return p;
 
+    /* Then memory a dead thread left behind. Even if the adopted segment
+     * has no page of this class, its free pages are used before a new
+     * segment is mapped. */
+    if (ts_heap_adopt(heap) && (p = queue_alloc(q)) != NULL)
+        return p;
+
     ts_page_t *page = page_fresh(heap, cls);
     if (page == NULL)
         return NULL;
@@ -210,7 +216,8 @@ size_t ts_heap_collect_remote(ts_heap_t *heap) {
 
 static pthread_mutex_t abandoned_lock = PTHREAD_MUTEX_INITIALIZER;
 static ts_segment_t *abandoned; /* linked through next/prev */
-static size_t abandoned_count;
+/* Written under the lock; read without it as a cheap "anything there?". */
+static _Atomic size_t abandoned_count;
 
 /* Clear TS_TF_FULL so remote frees into the page go to its thread_free list
  * from now on, never to the heap. */
@@ -267,15 +274,64 @@ void ts_heap_abandon(ts_heap_t *heap) {
         if (abandoned != NULL)
             abandoned->prev = seg;
         abandoned = seg;
-        abandoned_count++;
+        atomic_store_explicit(&abandoned_count,
+                              atomic_load_explicit(&abandoned_count, memory_order_relaxed) + 1,
+                              memory_order_relaxed);
         pthread_mutex_unlock(&abandoned_lock);
     }
     ts_heap_init(heap);
 }
 
+int ts_heap_adopt(ts_heap_t *heap) {
+    /* A heap with owner 0 would leave the segment looking abandoned. */
+    if (heap->thread_id == 0)
+        return 0;
+    if (atomic_load_explicit(&abandoned_count, memory_order_relaxed) == 0)
+        return 0;
+
+    /* Popping under the lock is what makes the segment ours; nobody else
+     * can reach it from the list, and no thread treats owner 0 as its own,
+     * so there is no need to CAS the owner. The lock also orders everything
+     * the abandoning thread wrote before us. */
+    pthread_mutex_lock(&abandoned_lock);
+    ts_segment_t *seg = abandoned;
+    if (seg != NULL) {
+        abandoned = seg->next;
+        if (abandoned != NULL)
+            abandoned->prev = NULL;
+        atomic_store_explicit(&abandoned_count,
+                              atomic_load_explicit(&abandoned_count, memory_order_relaxed) - 1,
+                              memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&abandoned_lock);
+    if (seg == NULL)
+        return 0;
+
+    /* seg->heap is read by remote freers only after they win a page's FULL
+     * flag, and only we set that, after this store (with release). */
+    seg->heap = heap;
+    atomic_store_explicit(&seg->thread_id, heap->thread_id, memory_order_relaxed);
+    segment_link(heap, seg);
+
+    for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++) {
+        ts_page_t *page = &seg->pages[i];
+        if (!page->in_use)
+            continue;
+        ts_page_collect(page);
+        if (ts_page_is_empty(page))
+            ts_segment_page_free(seg, page);
+        else
+            /* Full pages too: queue_alloc drops them on first look and
+             * flags them, which is how they rejoin the delayed path. */
+            queue_push_front(&heap->pages[page->size_class], page);
+    }
+    /* A segment that came back empty stays: we're about to need a page. */
+    return 1;
+}
+
 size_t ts_abandoned_count(void) {
     pthread_mutex_lock(&abandoned_lock);
-    size_t n = abandoned_count;
+    size_t n = atomic_load_explicit(&abandoned_count, memory_order_relaxed);
     pthread_mutex_unlock(&abandoned_lock);
     return n;
 }

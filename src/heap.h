@@ -30,7 +30,9 @@
  * When the owning thread exits, its heap is abandoned: everything that can
  * be freed is, and segments that still hold live blocks go onto a global
  * abandoned list with owner 0. Frees into them keep landing on their pages'
- * `thread_free` lists until another thread adopts them.
+ * `thread_free` lists until another thread adopts them: a heap that is
+ * about to need a fresh page takes one abandoned segment first, collects
+ * what was freed into it and queues its pages as its own.
  */
 typedef struct {
     ts_page_t *head;
@@ -74,6 +76,11 @@ size_t ts_heap_collect_remote(ts_heap_t *heap);
  * back and abandon the rest. The heap is empty afterwards (and no other
  * thread will touch it again, so it may be unmapped). */
 void ts_heap_abandon(ts_heap_t *heap);
+
+/* Owner only: take over one abandoned segment, if there is any. Returns 1
+ * if it did. ts_heap_malloc_class calls this before mapping new memory;
+ * heaps without an owning thread never adopt. */
+int ts_heap_adopt(ts_heap_t *heap);
 
 /* Number of abandoned segments, and a way for tests to look at them. The
  * callback runs with the abandoned list locked. */

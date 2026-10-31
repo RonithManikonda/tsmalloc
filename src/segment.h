@@ -79,6 +79,9 @@ _Static_assert(sizeof(ts_segment_t) <= TS_PAGE0_OFFSET, "segment header fits bef
 ts_segment_t *ts_segment_alloc(void);
 void ts_segment_free(ts_segment_t *seg);
 
+/* Segments currently mapped, process wide. */
+size_t ts_segment_count(void);
+
 /* A free page of `seg`, now marked in use, or NULL if the segment is full. */
 ts_page_t *ts_segment_page_alloc(ts_segment_t *seg);
 void ts_segment_page_free(ts_segment_t *seg, ts_page_t *page);
