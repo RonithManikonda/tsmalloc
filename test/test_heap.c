@@ -31,6 +31,11 @@ static void release_all(ts_heap_t *heap) {
         heap->segments = seg->next;
         ts_segment_free(seg);
     }
+    while (heap->seg_cache != NULL) {
+        ts_segment_t *seg = heap->seg_cache;
+        heap->seg_cache = seg->next;
+        ts_segment_free(seg);
+    }
 }
 
 enum { MANY = 20000 };
@@ -124,6 +129,114 @@ TEST(malloc_free_loop_reuses_block) {
         free_block(&heap, p);
     }
     CHECK_EQ(used_pages(&heap), 1);
+    release_all(&heap);
+}
+
+/* ---- Retirement --------------------------------------------------------- */
+
+/* One empty page per class stays even when the class has other pages, so a
+ * count that hovers at a page boundary doesn't churn pages. */
+TEST(one_spare_page_per_class) {
+    ts_heap_t heap = {0};
+    unsigned cls = ts_size_to_class(1024);
+    size_t n = 0;
+    while (used_pages(&heap) < 3) {
+        blocks[n] = ts_heap_malloc_small(&heap, 1024);
+        REQUIRE(blocks[n] != NULL);
+        n++;
+    }
+    /* Empty the first page: it becomes the spare and stays queued. */
+    ts_page_t *first = ts_ptr_page(ts_ptr_segment(blocks[0]), blocks[0]);
+    size_t i = 0;
+    while (i < n && ts_ptr_page(ts_ptr_segment(blocks[i]), blocks[i]) == first)
+        free_block(&heap, blocks[i++]);
+    CHECK(ts_page_is_empty(first));
+    CHECK(first->in_use && first->queued);
+    CHECK(heap.spare[cls] == first);
+    CHECK_EQ(used_pages(&heap), 3);
+
+    /* Empty the second page too: with a spare already there, it goes. */
+    ts_page_t *second = ts_ptr_page(ts_ptr_segment(blocks[i]), blocks[i]);
+    while (i < n && ts_ptr_page(ts_ptr_segment(blocks[i]), blocks[i]) == second)
+        free_block(&heap, blocks[i++]);
+    CHECK(!second->in_use);
+    CHECK_EQ(used_pages(&heap), 2);
+
+    /* Allocating from the spare makes it an ordinary page again; the next
+     * page to empty takes over the slot. */
+    void *p = ts_heap_malloc_small(&heap, 1024);
+    CHECK(ts_ptr_page(ts_ptr_segment(p), p) == first);
+    while (i < n)
+        free_block(&heap, blocks[i++]);
+    ts_page_t *third = ts_ptr_page(ts_ptr_segment(blocks[n - 1]), blocks[n - 1]);
+    CHECK(heap.spare[cls] == third);
+    CHECK(third->in_use);
+    free_block(&heap, p);
+    CHECK(!first->in_use); /* second empty page of the class */
+    CHECK_EQ(used_pages(&heap), 1);
+    release_all(&heap);
+}
+
+static size_t cached_segments(const ts_heap_t *heap) {
+    size_t n = 0;
+    for (const ts_segment_t *s = heap->seg_cache; s != NULL; s = s->next)
+        n++;
+    return n;
+}
+
+/* Biggest class, so a segment fills after ~250 blocks. */
+enum { BIG = 16384, SEGS = 6 };
+
+static size_t fill_segments(ts_heap_t *heap, size_t segs) {
+    size_t n = 0;
+    while (count_segments(heap) < segs || used_pages(heap) % TS_PAGES_PER_SEGMENT != 0) {
+        blocks[n] = ts_heap_malloc_small(heap, BIG);
+        if (blocks[n] == NULL)
+            break;
+        n++;
+    }
+    return n;
+}
+
+TEST(empty_segments_are_cached_up_to_a_limit) {
+    ts_heap_t heap = {0};
+    size_t mapped = ts_segment_count();
+    size_t n = fill_segments(&heap, SEGS);
+    CHECK_EQ(count_segments(&heap), SEGS);
+    CHECK_EQ(ts_segment_count(), mapped + SEGS);
+
+    for (size_t i = 0; i < n; i++)
+        free_block(&heap, blocks[i]);
+    /* The spare page keeps one segment; two more wait in the cache; the
+     * rest went back to the OS. */
+    CHECK_EQ(count_segments(&heap), 1);
+    CHECK_EQ(cached_segments(&heap), TS_SEGMENT_CACHE_MAX);
+    CHECK_EQ(ts_segment_count(), mapped + 1 + TS_SEGMENT_CACHE_MAX);
+
+    /* Growing again uses the cached segments before mapping new ones. */
+    n = fill_segments(&heap, 1 + TS_SEGMENT_CACHE_MAX);
+    CHECK_EQ(cached_segments(&heap), 0);
+    CHECK_EQ(ts_segment_count(), mapped + 1 + TS_SEGMENT_CACHE_MAX);
+    for (size_t i = 0; i < n; i++)
+        free_block(&heap, blocks[i]);
+    release_all(&heap);
+    CHECK_EQ(ts_segment_count(), mapped);
+}
+
+/* Live memory going back and forth across a segment boundary must not
+ * map and unmap a segment each time. */
+TEST(no_segment_churn_at_a_boundary) {
+    ts_heap_t heap = {0};
+    size_t n = fill_segments(&heap, 1);
+    size_t mapped = ts_segment_count();
+    for (int i = 0; i < 1000; i++) {
+        void *p = ts_heap_malloc_small(&heap, BIG); /* needs a second segment */
+        REQUIRE(p != NULL);
+        free_block(&heap, p);
+    }
+    CHECK(ts_segment_count() <= mapped + 1);
+    for (size_t i = 0; i < n; i++)
+        free_block(&heap, blocks[i]);
     release_all(&heap);
 }
 

@@ -69,6 +69,11 @@ static void release_all(ts_heap_t *heap) {
         heap->segments = seg->next;
         ts_segment_free(seg);
     }
+    while (heap->seg_cache != NULL) {
+        ts_segment_t *seg = heap->seg_cache;
+        heap->seg_cache = seg->next;
+        ts_segment_free(seg);
+    }
 }
 
 static void free_remote(void *p) {

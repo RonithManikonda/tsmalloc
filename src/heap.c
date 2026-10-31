@@ -45,7 +45,36 @@ static void segment_unlink(ts_heap_t *heap, ts_segment_t *seg) {
         seg->next->prev = seg->prev;
 }
 
-/* A page from any owned segment with room, or from a new segment. */
+/* Hold on to an empty segment, or unmap it if the cache is full. Its pages
+ * are all free, so no other thread holds a block in it. */
+static void segment_cache_push(ts_heap_t *heap, ts_segment_t *seg) {
+    if (heap->seg_cache_count == TS_SEGMENT_CACHE_MAX) {
+        ts_segment_free(seg);
+        return;
+    }
+    seg->prev = NULL;
+    seg->next = heap->seg_cache;
+    heap->seg_cache = seg;
+    heap->seg_cache_count++;
+}
+
+static ts_segment_t *segment_cache_pop(ts_heap_t *heap) {
+    ts_segment_t *seg = heap->seg_cache;
+    if (seg != NULL) {
+        heap->seg_cache = seg->next;
+        heap->seg_cache_count--;
+    }
+    return seg;
+}
+
+static void segment_cache_release(ts_heap_t *heap) {
+    ts_segment_t *seg;
+    while ((seg = segment_cache_pop(heap)) != NULL)
+        ts_segment_free(seg);
+}
+
+/* A page from any owned segment with room, else from a cached or new
+ * segment. */
 static ts_page_t *page_fresh(ts_heap_t *heap, unsigned cls) {
     ts_page_t *page = NULL;
     for (ts_segment_t *seg = heap->segments; seg != NULL; seg = seg->next) {
@@ -54,11 +83,14 @@ static ts_page_t *page_fresh(ts_heap_t *heap, unsigned cls) {
             break;
     }
     if (page == NULL) {
-        ts_segment_t *seg = ts_segment_alloc();
-        if (seg == NULL)
-            return NULL;
-        seg->heap = heap;
-        atomic_store_explicit(&seg->thread_id, heap->thread_id, memory_order_relaxed);
+        ts_segment_t *seg = segment_cache_pop(heap);
+        if (seg == NULL) {
+            seg = ts_segment_alloc();
+            if (seg == NULL)
+                return NULL;
+            seg->heap = heap;
+            atomic_store_explicit(&seg->thread_id, heap->thread_id, memory_order_relaxed);
+        }
         segment_link(heap, seg);
         page = ts_segment_page_alloc(seg);
     }
@@ -69,11 +101,9 @@ static ts_page_t *page_fresh(ts_heap_t *heap, unsigned cls) {
 
 static void page_retire(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
     ts_segment_page_free(seg, page);
-    /* Keep the last segment around even when empty: a program that frees
-     * everything and starts again shouldn't pay for an mmap each time. */
-    if (seg->used_pages == 0 && (seg->next != NULL || seg->prev != NULL)) {
+    if (seg->used_pages == 0) {
         segment_unlink(heap, seg);
-        ts_segment_free(seg);
+        segment_cache_push(heap, seg);
     }
 }
 
@@ -125,11 +155,17 @@ void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, voi
     ts_page_queue_t *q = &heap->pages[page->size_class];
 
     if (ts_page_is_empty(page)) {
-        /* An empty page that is the only one in its queue stays: otherwise
-         * a loop of malloc(n); free() would set up and tear down a page on
-         * every iteration. */
-        if (page->queued && q->head == page && page->next == NULL)
+        /* Keep one empty page per class: otherwise a loop of malloc(n);
+         * free() at a page boundary would set up and tear down a page on
+         * every iteration. The spare slot may point at a page that has
+         * been allocated from since; then this one takes over. */
+        ts_page_t *spare = heap->spare[page->size_class];
+        if (spare == NULL || spare == page || !ts_page_is_empty(spare)) {
+            heap->spare[page->size_class] = page;
+            if (!page->queued)
+                queue_push_front(q, page);
             return;
+        }
         if (page->queued)
             queue_remove(q, page);
         page_retire(heap, seg, page);
@@ -279,6 +315,7 @@ void ts_heap_abandon(ts_heap_t *heap) {
                               memory_order_relaxed);
         pthread_mutex_unlock(&abandoned_lock);
     }
+    segment_cache_release(heap);
     ts_heap_init(heap);
 }
 

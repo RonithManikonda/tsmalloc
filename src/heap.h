@@ -38,10 +38,20 @@ typedef struct {
     ts_page_t *head;
 } ts_page_queue_t;
 
+/* Empty segments a heap keeps rather than unmapping. A program whose live
+ * memory swings by a few segments shouldn't pay for an munmap and an mmap
+ * (plus page faults) every swing; past this, empty segments go back. */
+#define TS_SEGMENT_CACHE_MAX 2
+
 struct ts_heap_s {
     uintptr_t thread_id;    /* owner's ts_thread_id(), 0 for a heap no thread owns */
     ts_page_queue_t pages[TS_NUM_CLASSES];
-    ts_segment_t *segments; /* every segment this heap owns */
+    /* At most one empty page per class stays queued instead of going back
+     * to its segment; this is it, if it is still empty. */
+    ts_page_t *spare[TS_NUM_CLASSES];
+    ts_segment_t *segments;  /* segments with pages in use */
+    ts_segment_t *seg_cache; /* empty segments kept for reuse (via next) */
+    unsigned seg_cache_count;
 
     /* Remote frees into full pages (see above). Many pushers, and only the
      * owner takes, always the whole list at once, so there is no ABA. */
