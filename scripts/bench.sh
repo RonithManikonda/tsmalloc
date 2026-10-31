@@ -33,9 +33,9 @@ threads="$(printf '%s\n' $threads | sort -n -u | tr '\n' ' ')"
 cmake -S "$root" -B "$build" -DCMAKE_BUILD_TYPE=Release -DTS_SANITIZER=none >/dev/null
 cmake --build "$build" -j "$ncpu" >/dev/null
 
-# Work per thread, a quarter of each program's default or less. With the
-# global-lock heap a full sweep still takes ~18 minutes on 14 cores, nearly
-# all of it tsmalloc waiting on its mutex; --quick is the fast check.
+# Work per thread, a quarter of each program's default or less. A full sweep
+# takes ~10 s on 14 cores (it was ~18 minutes with the global-lock heap,
+# nearly all of it waiting on the mutex); --quick is the fast check.
 benches=(
     "threadtest    $((5000 / scale))"
     "larson        $((500000 / scale))"

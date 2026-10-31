@@ -25,11 +25,13 @@ enough to explain end to end:
 Early days. Small sizes (up to 16 KiB) come from pages in 4 MiB segments. Every thread gets its own
 heap, with a page queue per size class, on its first malloc. Allocating and freeing your own blocks
 takes no lock. A block freed by another thread is pushed with one CAS onto its page's `thread_free`
-list, and the owner splices that list back in when the page runs dry. Heaps of exited threads aren't
-reclaimed yet. Larger sizes get their own `mmap`'d region. There are no per-block headers: `ts_free` masks the pointer to find its
-segment or mapping and reads the block size from there.
+list, and the owner splices that list back in when the page runs dry. When a thread exits, its heap
+is abandoned: free memory goes back, and segments that still hold live blocks wait on a global list
+until another thread adopts them. Larger sizes get their own `mmap`'d region. There are no per-block
+headers: `ts_free` masks the pointer to find its segment or mapping and reads the block size from
+there.
 
-Benchmarks and the first numbers against macOS libmalloc are in
+Benchmarks and numbers against macOS libmalloc are in
 [docs/benchmarks.md](docs/benchmarks.md). Run them with `scripts/bench.sh` (`--quick` for a short
 sanity run).
 
