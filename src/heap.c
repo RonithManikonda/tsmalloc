@@ -3,25 +3,49 @@
 #include <pthread.h>
 #include <sched.h>
 
+ts_page_t ts_page_empty;
+
 void ts_heap_init(ts_heap_t *heap) {
     *heap = (ts_heap_t){0};
+    for (size_t i = 0; i < TS_DIRECT_SLOTS; i++)
+        heap->pages_direct[i] = &ts_page_empty;
     atomic_init(&heap->delayed_free, NULL);
 }
 
-static void queue_push_front(ts_page_queue_t *q, ts_page_t *page) {
+/* Point the direct slots of class `cls` at its queue head. The class covers
+ * request sizes (previous class size, its size], i.e. slots prev/16 + 1 up
+ * to size/16; class 0 also takes slot 0 for malloc(0). */
+static void direct_update(ts_heap_t *heap, unsigned cls) {
+    size_t size = ts_class_size(cls);
+    if (size > TS_LUT_MAX)
+        return;
+    size_t lo = cls == 0 ? 0 : ts_class_size(cls - 1) / 16 + 1;
+    ts_page_t *head = heap->pages[cls].head;
+    if (head == NULL)
+        head = &ts_page_empty;
+    for (size_t i = lo; i <= size / 16; i++)
+        heap->pages_direct[i] = head;
+}
+
+static void queue_push_front(ts_heap_t *heap, unsigned cls, ts_page_t *page) {
+    ts_page_queue_t *q = &heap->pages[cls];
     page->prev = NULL;
     page->next = q->head;
     if (q->head != NULL)
         q->head->prev = page;
     q->head = page;
     page->queued = 1;
+    direct_update(heap, cls);
 }
 
-static void queue_remove(ts_page_queue_t *q, ts_page_t *page) {
-    if (page->prev != NULL)
+static void queue_remove(ts_heap_t *heap, unsigned cls, ts_page_t *page) {
+    ts_page_queue_t *q = &heap->pages[cls];
+    if (page->prev != NULL) {
         page->prev->next = page->next;
-    else
+    } else {
         q->head = page->next;
+        direct_update(heap, cls);
+    }
     if (page->next != NULL)
         page->next->prev = page->prev;
     page->next = page->prev = NULL;
@@ -111,8 +135,9 @@ void *ts_heap_malloc_small(ts_heap_t *heap, size_t size) {
     return ts_heap_malloc_class(heap, ts_size_to_class(size));
 }
 
-/* A block from the first page in `q` that has one, or NULL. */
-TS_INLINE void *queue_alloc(ts_page_queue_t *q) {
+/* A block from the first page of class `cls` that has one, or NULL. */
+TS_INLINE void *queue_alloc(ts_heap_t *heap, unsigned cls) {
+    ts_page_queue_t *q = &heap->pages[cls];
     for (ts_page_t *page = q->head; page != NULL; page = q->head) {
         void *p = ts_page_alloc(page);
         if (ts_likely(p != NULL))
@@ -120,59 +145,58 @@ TS_INLINE void *queue_alloc(ts_page_queue_t *q) {
         /* Full: drop it from the queue until one of its blocks is freed,
          * unless a remote free arrived meanwhile. Then try it again. */
         if (ts_page_mark_full(page))
-            queue_remove(q, page);
+            queue_remove(heap, cls, page);
     }
     return NULL;
 }
 
 void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls) {
-    ts_page_queue_t *q = &heap->pages[cls];
-    void *p = queue_alloc(q);
+    void *p = queue_alloc(heap, cls);
     if (ts_likely(p != NULL))
         return p;
 
     /* Take back remote frees into full pages before reaching for a fresh
      * one. A thread whose blocks are all freed elsewhere (a producer) would
      * otherwise never see its full pages again and keep growing. */
-    if (ts_heap_collect_remote(heap) > 0 && (p = queue_alloc(q)) != NULL)
+    if (ts_heap_collect_remote(heap) > 0 && (p = queue_alloc(heap, cls)) != NULL)
         return p;
 
     /* Then memory a dead thread left behind. Even if the adopted segment
      * has no page of this class, its free pages are used before a new
      * segment is mapped. */
-    if (ts_heap_adopt(heap) && (p = queue_alloc(q)) != NULL)
+    if (ts_heap_adopt(heap) && (p = queue_alloc(heap, cls)) != NULL)
         return p;
 
     ts_page_t *page = page_fresh(heap, cls);
     if (page == NULL)
         return NULL;
-    queue_push_front(q, page);
+    queue_push_front(heap, cls, page);
     return ts_page_alloc(page);
 }
 
 void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, void *p) {
     ts_page_free(page, p);
-    ts_page_queue_t *q = &heap->pages[page->size_class];
+    unsigned cls = page->size_class;
 
     if (ts_page_is_empty(page)) {
         /* Keep one empty page per class: otherwise a loop of malloc(n);
          * free() at a page boundary would set up and tear down a page on
          * every iteration. The spare slot may point at a page that has
          * been allocated from since; then this one takes over. */
-        ts_page_t *spare = heap->spare[page->size_class];
+        ts_page_t *spare = heap->spare[cls];
         if (spare == NULL || spare == page || !ts_page_is_empty(spare)) {
-            heap->spare[page->size_class] = page;
+            heap->spare[cls] = page;
             if (!page->queued)
-                queue_push_front(q, page);
+                queue_push_front(heap, cls, page);
             return;
         }
         if (page->queued)
-            queue_remove(q, page);
+            queue_remove(heap, cls, page);
         page_retire(heap, seg, page);
         return;
     }
     if (!page->queued)
-        queue_push_front(q, page);
+        queue_push_front(heap, cls, page);
 }
 
 void ts_heap_free_remote(ts_segment_t *seg, ts_page_t *page, void *p) {
@@ -360,7 +384,7 @@ int ts_heap_adopt(ts_heap_t *heap) {
         else
             /* Full pages too: queue_alloc drops them on first look and
              * flags them, which is how they rejoin the delayed path. */
-            queue_push_front(&heap->pages[page->size_class], page);
+            queue_push_front(heap, page->size_class, page);
     }
     /* A segment that came back empty stays: we're about to need a page. */
     return 1;

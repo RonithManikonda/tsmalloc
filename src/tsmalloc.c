@@ -77,7 +77,7 @@ static TS_NOINLINE ts_heap_t *heap_create(void) {
     return heap;
 }
 
-static void *small_alloc_class(unsigned cls) {
+static TS_NOINLINE void *small_alloc_class(unsigned cls) {
     ts_heap_t *heap = tl_heap;
     if (ts_unlikely(heap == NULL)) {
         heap = heap_create();
@@ -87,7 +87,22 @@ static void *small_alloc_class(unsigned cls) {
     return ts_heap_malloc_class(heap, cls);
 }
 
+/* The malloc fast path, inlined into every caller: for sizes up to
+ * TS_LUT_MAX it is the TLS load, one load from pages_direct, and popping
+ * the page's free list. Anything else (no heap yet, an empty or exhausted
+ * page, bigger sizes) goes through small_alloc_class, which never inlines
+ * so this stays small. */
 TS_INLINE void *small_alloc(size_t size) {
+    ts_heap_t *heap = tl_heap;
+    if (ts_likely(heap != NULL && size <= TS_LUT_MAX)) {
+        ts_page_t *page = heap->pages_direct[(size + 15) >> 4];
+        ts_block_t *b = page->free;
+        if (ts_likely(b != NULL)) {
+            page->free = b->next;
+            page->used++;
+            return b;
+        }
+    }
     return small_alloc_class(ts_size_to_class(size));
 }
 

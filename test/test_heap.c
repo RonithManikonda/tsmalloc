@@ -240,6 +240,77 @@ TEST(no_segment_churn_at_a_boundary) {
     release_all(&heap);
 }
 
+/* Every direct slot names the head of its class's queue, or the empty page. */
+static int direct_in_sync(const ts_heap_t *heap) {
+    for (size_t s = 0; s < TS_DIRECT_SLOTS; s++) {
+        const ts_page_t *head = heap->pages[ts_class_lut[s]].head;
+        if (heap->pages_direct[s] != (head != NULL ? head : &ts_page_empty))
+            return 0;
+    }
+    return 1;
+}
+
+/* Random mallocs and frees of every size the direct slots cover, crossing
+ * page and segment boundaries; after each step the slots must agree with
+ * the queues, or the malloc fast path would hand out blocks of the wrong
+ * size (or of a page that left its queue). */
+TEST(direct_slots_follow_queue_heads) {
+    enum { LIVE = 4096, STEPS = 60000 };
+    static void *live[LIVE];
+    ts_heap_t heap;
+    ts_heap_init(&heap);
+    CHECK(direct_in_sync(&heap));
+    CHECK(heap.pages_direct[0] == &ts_page_empty);
+
+    uint64_t x = 0x9e3779b97f4a7c15u;
+    size_t n = 0, bad = 0;
+    for (int step = 0; step < STEPS; step++) {
+        x ^= x << 13, x ^= x >> 7, x ^= x << 17;
+        if (n < LIVE && (n == 0 || (x & 3) != 0)) {
+            size_t size = (size_t)(x >> 20) % (TS_LUT_MAX + 1);
+            void *p = ts_heap_malloc_small(&heap, size);
+            REQUIRE(p != NULL);
+            live[n++] = p;
+        } else {
+            size_t i = (size_t)(x >> 24) % n;
+            free_block(&heap, live[i]);
+            live[i] = live[--n];
+        }
+        bad += !direct_in_sync(&heap);
+    }
+    CHECK_EQ(bad, 0);
+
+    /* With a page queued, the slot hands out that page's next block, which
+     * is exactly what the fast path in ts_malloc does. */
+    for (size_t size = 1; size <= TS_LUT_MAX; size += 37) {
+        ts_page_t *page = heap.pages_direct[(size + 15) >> 4];
+        if (page->free == NULL)
+            continue;
+        CHECK(page->block_size >= size);
+        CHECK_EQ(page->size_class, ts_size_to_class(size));
+    }
+
+    while (n > 0)
+        free_block(&heap, live[--n]);
+    CHECK(direct_in_sync(&heap));
+    release_all(&heap);
+}
+
+/* Through ts_malloc, which takes the fast path once a page is queued. */
+TEST(public_fast_path_sizes) {
+    for (size_t size = 0; size <= TS_LUT_MAX; size++) {
+        void *a = ts_malloc(size);
+        void *b = ts_malloc(size); /* this one should come off pages_direct */
+        REQUIRE(a != NULL && b != NULL);
+        CHECK_EQ(ts_usable_size(b), ts_class_size(ts_size_to_class(size)));
+        CHECK_EQ((uintptr_t)b % TS_ALIGN, 0);
+        if (size > 0)
+            memset(b, 0xab, size);
+        ts_free(a);
+        ts_free(b);
+    }
+}
+
 TEST(public_small_blocks_have_no_header) {
     unsigned char *a = ts_malloc(32);
     unsigned char *b = ts_malloc(32);

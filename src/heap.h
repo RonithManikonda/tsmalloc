@@ -43,7 +43,20 @@ typedef struct {
  * (plus page faults) every swing; past this, empty segments go back. */
 #define TS_SEGMENT_CACHE_MAX 2
 
+/* One slot per 16 B of request size up to TS_LUT_MAX, like ts_class_lut. */
+#define TS_DIRECT_SLOTS (TS_LUT_MAX / 16 + 1)
+
+/* A page with no blocks and no room, so the malloc fast path can always
+ * read `pages_direct[i]->free` without a NULL check. Never allocated from:
+ * finding `free` empty sends malloc to the slow path. */
+extern ts_page_t ts_page_empty;
+
 struct ts_heap_s {
+    /* pages_direct[(size + 15) / 16] is the head of the queue for that
+     * size's class, or &ts_page_empty when the queue is empty. It turns
+     * small malloc into heap -> page -> free block, with no class lookup
+     * and no queue walk. Kept in sync wherever a queue head changes. */
+    ts_page_t *pages_direct[TS_DIRECT_SLOTS];
     uintptr_t thread_id;    /* owner's ts_thread_id(), 0 for a heap no thread owns */
     ts_page_queue_t pages[TS_NUM_CLASSES];
     /* At most one empty page per class stays queued instead of going back
@@ -58,7 +71,8 @@ struct ts_heap_s {
     _Atomic(ts_block_t *) delayed_free;
 };
 
-/* Set up an empty heap with no owning thread. */
+/* Set up an empty heap with no owning thread. (A `{0}` heap works for
+ * everything but the direct slots, which only the malloc fast path reads.) */
 void ts_heap_init(ts_heap_t *heap);
 
 /* Block of at least `size` bytes (size <= TS_SMALL_MAX), or NULL with errno
