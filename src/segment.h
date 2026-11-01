@@ -28,12 +28,13 @@ struct ts_block_s {
  * descriptor too). */
 struct ts_page_s {
     uint8_t index;       /* position in the segment */
-    uint8_t in_use;      /* handed out by ts_segment_page_alloc */
+    uint8_t in_use;      /* TS_PAGE_FREE, TS_PAGE_USED or TS_PAGE_TAIL */
     uint8_t size_class;
     uint8_t queued;      /* linked into its heap's queue for size_class */
     uint16_t capacity;   /* blocks that fit in the page */
     uint16_t reserved;   /* blocks carved out so far (bump cursor) */
     uint16_t used;       /* blocks currently allocated */
+    uint8_t span_pages;  /* 64 KiB pages this page covers (1 unless a span head) */
     uint32_t block_size;
     ts_block_t *free;    /* blocks ready to hand out */
     /* Blocks the owner freed. Kept apart from `free` so malloc runs `free`
@@ -43,6 +44,14 @@ struct ts_page_s {
     ts_page_t *next;     /* page queue links */
     ts_page_t *prev;
 };
+
+/* page->in_use. A span of n pages is one page as far as the heap is
+ * concerned: its first descriptor is TS_PAGE_USED and does all the work,
+ * the n - 1 after it are TS_PAGE_TAIL and only mark the space as taken.
+ * Code that walks a segment's pages looks at TS_PAGE_USED ones only. */
+#define TS_PAGE_FREE 0
+#define TS_PAGE_USED 1
+#define TS_PAGE_TAIL 2
 
 /* First word of every region a pointer can come from, so free can tell a
  * page-backed block from a large mapping after one mask. */
@@ -64,6 +73,12 @@ struct ts_segment_s {
     ts_segment_t *next; /* links for whoever owns the segment */
     ts_segment_t *prev;
     uint32_t used_pages;
+    /* span_offset[i]: how far page i is from the first page of the span
+     * that covers it (0 for a span's first page and for ordinary pages).
+     * Read by every free to find the descriptor of a block; written only
+     * while a span is set up or torn down, when no block of it is out, so
+     * it sits with the other read-mostly fields, away from the descriptors. */
+    uint8_t span_offset[TS_PAGES_PER_SEGMENT];
     /* Everything above and the page descriptors are written only by the
      * owner (after setup), and the descriptors on every malloc and free. */
     ts_page_t pages[TS_PAGES_PER_SEGMENT];
@@ -101,6 +116,13 @@ size_t ts_segment_count(void);
 
 /* A free page of `seg`, now marked in use, or NULL if the segment is full. */
 ts_page_t *ts_segment_page_alloc(ts_segment_t *seg);
+
+/* `npages` (1 .. TS_PAGES_PER_SEGMENT) contiguous free pages of `seg` as one
+ * span, or NULL if no run that long is free. Returns the first descriptor,
+ * with span_pages set. */
+ts_page_t *ts_segment_span_alloc(ts_segment_t *seg, size_t npages);
+
+/* Give back a page or a whole span (pass its first descriptor). */
 void ts_segment_page_free(ts_segment_t *seg, ts_page_t *page);
 
 /* Segment containing any address inside it (only meaningful for pointers
@@ -109,9 +131,15 @@ TS_INLINE ts_segment_t *ts_ptr_segment(const void *p) {
     return (ts_segment_t *)((uintptr_t)p & ~(uintptr_t)TS_SEGMENT_MASK);
 }
 
-TS_INLINE ts_page_t *ts_ptr_page(ts_segment_t *seg, const void *p) {
+/* Index of the page (or span) holding p: the 64 KiB slot it falls in,
+ * moved back to the start of its span. */
+TS_INLINE size_t ts_ptr_page_index(const ts_segment_t *seg, const void *p) {
     size_t idx = ((uintptr_t)p - (uintptr_t)seg) >> TS_PAGE_SHIFT;
-    return &seg->pages[idx];
+    return idx - seg->span_offset[idx];
+}
+
+TS_INLINE ts_page_t *ts_ptr_page(ts_segment_t *seg, const void *p) {
+    return &seg->pages[ts_ptr_page_index(seg, p)];
 }
 
 /* A page's remote-free list. Works from the descriptor alone: descriptors
@@ -123,7 +151,7 @@ TS_INLINE _Atomic uintptr_t *ts_page_thread_free(ts_page_t *page) {
 /* The same list, found from a block's address with no load at all. Remote
  * freers use this so they never read the owner's descriptor line. */
 TS_INLINE _Atomic uintptr_t *ts_ptr_thread_free(ts_segment_t *seg, const void *p) {
-    return &seg->thread_free[((uintptr_t)p - (uintptr_t)seg) >> TS_PAGE_SHIFT];
+    return &seg->thread_free[ts_ptr_page_index(seg, p)];
 }
 
 /* Where page data starts: TS_PAGE0_OFFSET in for page 0 (after the header),
@@ -136,7 +164,8 @@ TS_INLINE uint8_t *ts_page_start(ts_segment_t *seg, const ts_page_t *page) {
 }
 
 TS_INLINE size_t ts_page_usable(const ts_page_t *page) {
-    return page->index == 0 ? TS_PAGE_SIZE - TS_PAGE0_OFFSET : TS_PAGE_SIZE;
+    size_t bytes = (size_t)page->span_pages << TS_PAGE_SHIFT;
+    return page->index == 0 ? bytes - TS_PAGE0_OFFSET : bytes;
 }
 
 #endif /* TS_SEGMENT_H */

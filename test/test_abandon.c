@@ -27,7 +27,7 @@ static void count_live(ts_segment_t *seg, void *arg) {
     size_t *live = arg;
     for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++) {
         ts_page_t *page = &seg->pages[i];
-        if (page->in_use)
+        if (page->in_use == TS_PAGE_USED)
             *live += page->used - remote_list_len(page);
     }
 }
@@ -43,7 +43,7 @@ static void check_unowned(ts_segment_t *seg, void *arg) {
     if (atomic_load(&seg->thread_id) != 0 || seg->heap != NULL)
         (*bad)++;
     for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++)
-        if (seg->pages[i].in_use && (seg->pages[i].queued ||
+        if (seg->pages[i].in_use == TS_PAGE_USED && (seg->pages[i].queued ||
                                      (atomic_load(ts_page_thread_free(&seg->pages[i])) & TS_TF_FLAGS)))
             (*bad)++;
 }

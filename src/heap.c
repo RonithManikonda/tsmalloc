@@ -304,7 +304,7 @@ void ts_heap_abandon(ts_heap_t *heap) {
      *    can reach the heap, so after 2 nothing is left on it. */
     for (ts_segment_t *seg = heap->segments; seg != NULL; seg = seg->next)
         for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++)
-            if (seg->pages[i].in_use)
+            if (seg->pages[i].in_use == TS_PAGE_USED)
                 page_stop_delayed(&seg->pages[i]);
     ts_heap_collect_remote(heap);
 
@@ -316,7 +316,7 @@ void ts_heap_abandon(ts_heap_t *heap) {
         next = seg->next;
         for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++) {
             ts_page_t *page = &seg->pages[i];
-            if (!page->in_use)
+            if (page->in_use != TS_PAGE_USED)
                 continue;
             ts_page_collect(page);
             page->queued = 0;
@@ -381,7 +381,7 @@ int ts_heap_adopt(ts_heap_t *heap) {
 
     for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++) {
         ts_page_t *page = &seg->pages[i];
-        if (!page->in_use)
+        if (page->in_use != TS_PAGE_USED)
             continue;
         ts_page_collect(page);
         if (ts_page_is_empty(page))

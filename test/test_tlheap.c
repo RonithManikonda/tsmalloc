@@ -24,7 +24,7 @@ static size_t blocks_in_use(const ts_heap_t *heap) {
     size_t n = 0;
     for (const ts_segment_t *s = heap->segments; s != NULL; s = s->next)
         for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++)
-            if (s->pages[i].in_use)
+            if (s->pages[i].in_use == TS_PAGE_USED)
                 n += s->pages[i].used;
     return n;
 }

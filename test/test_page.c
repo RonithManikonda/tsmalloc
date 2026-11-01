@@ -8,7 +8,7 @@ static const size_t page_indices[] = {0, 5};
 
 static ts_page_t *setup(ts_segment_t *seg, size_t index, size_t bsize) {
     ts_page_t *page = &seg->pages[index];
-    page->in_use = 1;
+    page->in_use = TS_PAGE_USED;
     ts_page_init(page, bsize);
     return page;
 }
