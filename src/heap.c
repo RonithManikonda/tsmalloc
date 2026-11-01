@@ -176,6 +176,10 @@ void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls) {
 
 void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, void *p) {
     ts_page_free(page, p);
+    ts_heap_page_freed(heap, seg, page);
+}
+
+void ts_heap_page_freed(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
     unsigned cls = page->size_class;
 
     if (ts_page_is_empty(page)) {

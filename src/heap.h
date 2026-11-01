@@ -86,6 +86,12 @@ void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls);
  * Only the heap's owner may call this. */
 void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, void *p);
 
+/* The rest of ts_heap_free_small, once the block is back on `page`: queue
+ * the page if it had left its queue, keep or retire it if it is empty. The
+ * inlined free fast path does the push itself and calls this only when the
+ * page is empty or unqueued afterwards. */
+void ts_heap_page_freed(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page);
+
 /* Return a block of `seg` from any thread other than its owner (or when it
  * has none). Lock-free, except for waiting out another freer that is busy
  * handing a block of the same page to the heap. */

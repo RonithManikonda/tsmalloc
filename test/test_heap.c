@@ -311,6 +311,45 @@ TEST(public_fast_path_sizes) {
     }
 }
 
+/* ts_free finishes most frees inline and hands the page to the heap only
+ * when it has to: a full page coming back to its queue, or a page going
+ * empty. Fill pages until some leave the queue, then free everything
+ * through the public API and check the heap's bookkeeping. */
+TEST(public_free_rejoins_and_empties_pages) {
+    enum { N = 3 * (TS_PAGE_SIZE / 1024) + 5 };
+    static void *ps[N];
+    for (size_t i = 0; i < N; i++) {
+        ps[i] = ts_malloc(1024);
+        REQUIRE(ps[i] != NULL);
+    }
+    ts_segment_t *seg = ts_ptr_segment(ps[0]);
+    ts_heap_t *heap = seg->heap;
+    REQUIRE(heap != NULL);
+    ts_page_t *first = ts_ptr_page(seg, ps[0]);
+    CHECK(!first->queued); /* filled up and dropped by malloc */
+
+    /* One free into a full page puts it back at the front of its queue,
+     * where the next malloc of that size finds it straight away. */
+    ts_free(ps[0]);
+    CHECK(first->queued);
+    CHECK(heap->pages_direct[1024 / 16] == first);
+    void *again = ts_malloc(1024);
+    CHECK(again == ps[0]);
+    ps[0] = again;
+
+    size_t live_before = 0;
+    for (ts_segment_t *s = heap->segments; s != NULL; s = s->next)
+        live_before += s->used_pages;
+    for (size_t i = 0; i < N; i++)
+        ts_free(ps[i]);
+    size_t live_after = 0;
+    for (ts_segment_t *s = heap->segments; s != NULL; s = s->next)
+        live_after += s->used_pages;
+    /* All but the spare page of the class went back to their segment. */
+    CHECK(live_after + 3 <= live_before);
+    CHECK(direct_in_sync(heap));
+}
+
 TEST(public_small_blocks_have_no_header) {
     unsigned char *a = ts_malloc(32);
     unsigned char *b = ts_malloc(32);

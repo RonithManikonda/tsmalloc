@@ -106,20 +106,6 @@ TS_INLINE void *small_alloc(size_t size) {
     return small_alloc_class(ts_size_to_class(size));
 }
 
-/* Local or remote is decided by the thread id stored in the segment rather
- * than by comparing heaps: the id is one register read away, while tl_heap
- * may cost a call into the TLS machinery (it does on macOS). A thread that
- * never allocated owns no segment, so its frees all take the remote path,
- * as they should. Relaxed is enough: only this thread ever stores its own
- * id into a segment, so the comparison can't succeed spuriously. */
-static void small_free(ts_segment_t *seg, void *p) {
-    ts_page_t *page = ts_ptr_page(seg, p);
-    if (ts_likely(atomic_load_explicit(&seg->thread_id, memory_order_relaxed) == ts_thread_id()))
-        ts_heap_free_small(seg->heap, seg, page, p);
-    else
-        ts_heap_free_remote(seg, page, p);
-}
-
 TS_INLINE void *region_of(const void *p) {
     return ts_ptr_segment((const char *)p - 1);
 }
@@ -176,18 +162,48 @@ void *ts_malloc(size_t size) {
     return large_alloc(size, TS_ALIGN);
 }
 
-void ts_free(void *p) {
-    if (p == NULL)
-        return;
-    void *region = region_of(p);
+/* Everything ts_free doesn't finish inline: remote small frees, local ones
+ * that empty a page or bring it back to its queue, and large blocks. */
+static TS_NOINLINE void free_slow(void *region, void *p) {
     uint32_t kind = region_kind(region);
     if (ts_likely(kind == TS_KIND_SEGMENT)) {
-        small_free(region, p);
+        ts_segment_t *seg = region;
+        ts_heap_free_remote(seg, ts_ptr_page(seg, p), p);
     } else if (kind == TS_KIND_LARGE) {
         large_free(region, p);
     } else {
         bad_pointer();
     }
+}
+
+/* Local or remote is decided by the thread id stored in the segment rather
+ * than by comparing heaps: the id is one register read away, while tl_heap
+ * may cost a call into the TLS machinery (it does on macOS). A thread that
+ * never allocated owns no segment, so its frees all take the remote path,
+ * as they should. Relaxed is enough: only this thread ever stores its own
+ * id into a segment, so the comparison can't succeed spuriously.
+ *
+ * A large mapping's header has no thread id where a segment keeps it
+ * (offset 8 is its `mapped` size, never a valid thread pointer), but the
+ * kind check comes first anyway so that is never relied on. */
+void ts_free(void *p) {
+    if (ts_unlikely(p == NULL))
+        return;
+    ts_segment_t *seg = region_of(p);
+    if (ts_likely(seg->kind == TS_KIND_SEGMENT &&
+                  atomic_load_explicit(&seg->thread_id, memory_order_relaxed) == ts_thread_id())) {
+        ts_page_t *page = ts_ptr_page(seg, p);
+        ts_block_t *b = p;
+        b->next = page->free;
+        page->free = b;
+        /* The common case ends here: the page still has live blocks and is
+         * on its queue, so there is nothing to fix up. */
+        if (ts_likely(--page->used != 0 && page->queued))
+            return;
+        ts_heap_page_freed(seg->heap, seg, page);
+        return;
+    }
+    free_slow(seg, p);
 }
 
 size_t ts_usable_size(const void *p) {
