@@ -70,7 +70,7 @@ TS_INLINE void *ts_page_alloc(ts_page_t *page) {
  * again. Release so a freer that sees the flag also sees seg->heap. */
 TS_INLINE int ts_page_mark_full(ts_page_t *page) {
     uintptr_t expected = 0;
-    if (atomic_compare_exchange_strong_explicit(&page->thread_free, &expected, TS_TF_FULL,
+    if (atomic_compare_exchange_strong_explicit(ts_page_thread_free(page), &expected, TS_TF_FULL,
                                                 memory_order_release, memory_order_relaxed))
         return 1;
     return expected == TS_TF_FULL; /* still flagged from the last time */

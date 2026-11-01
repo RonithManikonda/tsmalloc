@@ -78,7 +78,7 @@ static void release_all(ts_heap_t *heap) {
 
 static void free_remote(void *p) {
     ts_segment_t *seg = ts_ptr_segment(p);
-    ts_heap_free_remote(seg, ts_ptr_page(seg, p), p);
+    ts_heap_free_remote(seg, p);
 }
 
 typedef struct {
@@ -153,13 +153,13 @@ TEST(remote_free_into_full_page_requeues_it) {
     void *victim = blocks[n - 2]; /* in the second page, now full */
     ts_page_t *page = ts_ptr_page(ts_ptr_segment(victim), victim);
     CHECK(!page->queued);
-    CHECK_EQ(atomic_load(&page->thread_free), TS_TF_FULL);
+    CHECK_EQ(atomic_load(ts_page_thread_free(page)), TS_TF_FULL);
 
     pthread_t t;
     REQUIRE(pthread_create(&t, NULL, free_one, victim) == 0);
     pthread_join(t, NULL);
     CHECK(atomic_load(&heap.delayed_free) == victim);
-    CHECK_EQ(atomic_load(&page->thread_free), 0);
+    CHECK_EQ(atomic_load(ts_page_thread_free(page)), 0);
 
     CHECK_EQ(ts_heap_collect_remote(&heap), 1);
     CHECK(page->queued);
@@ -307,7 +307,7 @@ TEST(unowned_heap_blocks_take_remote_path) {
     ts_free(p);
     /* Still counted used: it waits on the page's remote list. */
     CHECK_EQ(page->used, 1);
-    CHECK(atomic_load(&page->thread_free) == (uintptr_t)p);
+    CHECK(atomic_load(ts_page_thread_free(page)) == (uintptr_t)p);
     CHECK_EQ(ts_page_collect(page), 1);
     CHECK_EQ(page->used, 0);
     release_all(&heap);

@@ -152,8 +152,8 @@ TEST(steady_owner_still_collects_remote_frees) {
     REQUIRE(keep != NULL && remote != NULL);
     ts_segment_t *seg = ts_ptr_segment(remote);
     ts_page_t *page = ts_ptr_page(seg, remote);
-    ts_heap_free_remote(seg, page, remote); /* as if from another thread */
-    CHECK(atomic_load(&page->thread_free) == (uintptr_t)remote);
+    ts_heap_free_remote(seg, remote); /* as if from another thread */
+    CHECK(atomic_load(ts_page_thread_free(page)) == (uintptr_t)remote);
     CHECK_EQ(page->used, 2);
 
     int seen = 0;
@@ -163,7 +163,7 @@ TEST(steady_owner_still_collects_remote_frees) {
         free_block(&heap, p);
     }
     CHECK(seen);
-    CHECK_EQ(atomic_load(&page->thread_free), 0);
+    CHECK_EQ(atomic_load(ts_page_thread_free(page)), 0);
     CHECK_EQ(page->used, 1);
     free_block(&heap, keep);
     release_all(&heap);

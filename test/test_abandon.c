@@ -14,7 +14,7 @@ enum { N = 3000 };
 static void *blocks[N];
 
 static size_t remote_list_len(ts_page_t *page) {
-    uintptr_t tf = atomic_load(&page->thread_free) & ~TS_TF_FLAGS;
+    uintptr_t tf = atomic_load(ts_page_thread_free(page)) & ~TS_TF_FLAGS;
     size_t n = 0;
     for (ts_block_t *b = (ts_block_t *)tf; b != NULL; b = b->next)
         n++;
@@ -44,7 +44,7 @@ static void check_unowned(ts_segment_t *seg, void *arg) {
         (*bad)++;
     for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++)
         if (seg->pages[i].in_use && (seg->pages[i].queued ||
-                                     (atomic_load(&seg->pages[i].thread_free) & TS_TF_FLAGS)))
+                                     (atomic_load(ts_page_thread_free(&seg->pages[i])) & TS_TF_FLAGS)))
             (*bad)++;
 }
 
@@ -131,9 +131,9 @@ TEST(abandon_collects_delayed_frees) {
     REQUIRE(pthread_create(&t, NULL, fill_then_wait, NULL) == 0);
     while (atomic_load(&dl.phase) != 1)
         sched_yield();
-    CHECK_EQ(atomic_load(&dl.victim_page->thread_free), TS_TF_FULL);
+    CHECK_EQ(atomic_load(ts_page_thread_free(dl.victim_page)), TS_TF_FULL);
     ts_free(dl.victim);
-    CHECK_EQ(atomic_load(&dl.victim_page->thread_free), 0);
+    CHECK_EQ(atomic_load(ts_page_thread_free(dl.victim_page)), 0);
     atomic_store(&dl.phase, 2);
     pthread_join(t, NULL);
 

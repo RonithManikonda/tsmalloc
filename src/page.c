@@ -9,15 +9,15 @@ void ts_page_init(ts_page_t *page, size_t block_size) {
     page->local_free = NULL;
     /* No other thread can hold a block of a page being set up, so nothing
      * races with this store. */
-    atomic_store_explicit(&page->thread_free, 0, memory_order_relaxed);
+    atomic_store_explicit(ts_page_thread_free(page), 0, memory_order_relaxed);
 }
 
 size_t ts_page_collect(ts_page_t *page) {
-    if ((atomic_load_explicit(&page->thread_free, memory_order_relaxed) & ~TS_TF_FLAGS) == 0)
+    if ((atomic_load_explicit(ts_page_thread_free(page), memory_order_relaxed) & ~TS_TF_FLAGS) == 0)
         return 0;
     /* Take the whole list, keep the flags. Acquire pairs with the release
      * CAS in ts_heap_free_remote, so the pushers' `next` links are visible. */
-    uintptr_t tf = atomic_fetch_and_explicit(&page->thread_free, TS_TF_FLAGS, memory_order_acquire);
+    uintptr_t tf = atomic_fetch_and_explicit(ts_page_thread_free(page), TS_TF_FLAGS, memory_order_acquire);
     ts_block_t *head = (ts_block_t *)(tf & ~TS_TF_FLAGS);
 
     /* Walking the list costs one load per block, but `used` needs the count

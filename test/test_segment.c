@@ -83,3 +83,23 @@ TEST(segments_are_distinct) {
     for (int i = 0; i < N; i++)
         ts_segment_free(segs[i]);
 }
+
+/* Remote freers find a page's thread_free slot from the block address,
+ * the owner from the descriptor; both must land on the same word, and
+ * none of those words may share a cache line with a descriptor. */
+TEST(thread_free_slots_off_the_descriptor_lines) {
+    ts_segment_t *seg = ts_segment_alloc();
+    REQUIRE(seg != NULL);
+    uintptr_t desc_end = (uintptr_t)&seg->pages[TS_PAGES_PER_SEGMENT];
+    for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++) {
+        ts_page_t *page = &seg->pages[i];
+        uint8_t *start = ts_page_start(seg, page);
+        uint8_t *last = start + ts_page_usable(page) - 1;
+        CHECK(ts_ptr_thread_free(seg, start) == ts_page_thread_free(page));
+        CHECK(ts_ptr_thread_free(seg, last) == ts_page_thread_free(page));
+        uintptr_t tf = (uintptr_t)ts_page_thread_free(page);
+        CHECK(tf / TS_CACHE_LINE > (desc_end - 1) / TS_CACHE_LINE);
+        CHECK(tf < (uintptr_t)ts_page_start(seg, &seg->pages[0]));
+    }
+    ts_segment_free(seg);
+}

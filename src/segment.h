@@ -40,10 +40,6 @@ struct ts_page_s {
      * dry and takes the slow path every so often, which is where remote
      * frees get collected; see ts_page_alloc_slow. */
     ts_block_t *local_free;
-    /* Blocks freed by other threads, pushed lock-free; the owner splices
-     * them into `free` when it runs dry. The low two bits are flags
-     * (TS_TF_FULL, TS_TF_BUSY in page.h). */
-    _Atomic uintptr_t thread_free;
     ts_page_t *next;     /* page queue links */
     ts_page_t *prev;
 };
@@ -68,7 +64,19 @@ struct ts_segment_s {
     ts_segment_t *next; /* links for whoever owns the segment */
     ts_segment_t *prev;
     uint32_t used_pages;
+    /* Everything above and the page descriptors are written only by the
+     * owner (after setup), and the descriptors on every malloc and free. */
     ts_page_t pages[TS_PAGES_PER_SEGMENT];
+    /* Blocks freed by other threads into each page, pushed lock-free; the
+     * owner splices them into `free` when it runs dry. The low two bits are
+     * flags (TS_TF_FULL, TS_TF_BUSY in page.h).
+     *
+     * These are the only words other threads write, so they live on their
+     * own cache lines rather than in the descriptors: a remote free into a
+     * page used to bounce the line holding that page's `free` and `used`
+     * (and its neighbours') away from the owner in the middle of a malloc.
+     * The owner reads them only on its slow path. */
+    _Alignas(TS_CACHE_LINE) _Atomic uintptr_t thread_free[TS_PAGES_PER_SEGMENT];
 };
 
 /* Page 0's data starts at this offset rather than right after the header.
@@ -78,6 +86,11 @@ struct ts_segment_s {
 #define TS_PAGE0_OFFSET ((size_t)4096)
 
 _Static_assert(sizeof(ts_segment_t) <= TS_PAGE0_OFFSET, "segment header fits before page 0 data");
+_Static_assert(offsetof(ts_segment_t, thread_free) % TS_CACHE_LINE == 0,
+               "remote-free lists don't share a line with the descriptors");
+/* The segment header ends in the thread_free lines, and page 0 data starts
+ * on its own line after them, so blocks never share one either. */
+_Static_assert(TS_PAGE0_OFFSET % TS_CACHE_LINE == 0, "page 0 data starts a cache line");
 
 /* Fresh segment from the OS with every page free, or NULL. */
 ts_segment_t *ts_segment_alloc(void);
@@ -99,6 +112,18 @@ TS_INLINE ts_segment_t *ts_ptr_segment(const void *p) {
 TS_INLINE ts_page_t *ts_ptr_page(ts_segment_t *seg, const void *p) {
     size_t idx = ((uintptr_t)p - (uintptr_t)seg) >> TS_PAGE_SHIFT;
     return &seg->pages[idx];
+}
+
+/* A page's remote-free list. Works from the descriptor alone: descriptors
+ * live in their segment's header, so masking finds the segment. */
+TS_INLINE _Atomic uintptr_t *ts_page_thread_free(ts_page_t *page) {
+    return &ts_ptr_segment(page)->thread_free[page->index];
+}
+
+/* The same list, found from a block's address with no load at all. Remote
+ * freers use this so they never read the owner's descriptor line. */
+TS_INLINE _Atomic uintptr_t *ts_ptr_thread_free(ts_segment_t *seg, const void *p) {
+    return &seg->thread_free[((uintptr_t)p - (uintptr_t)seg) >> TS_PAGE_SHIFT];
 }
 
 /* Where page data starts: TS_PAGE0_OFFSET in for page 0 (after the header),

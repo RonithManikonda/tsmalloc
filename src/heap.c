@@ -203,15 +203,16 @@ void ts_heap_page_freed(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
         queue_push_front(heap, cls, page);
 }
 
-void ts_heap_free_remote(ts_segment_t *seg, ts_page_t *page, void *p) {
+void ts_heap_free_remote(ts_segment_t *seg, void *p) {
     ts_block_t *b = p;
-    uintptr_t old = atomic_load_explicit(&page->thread_free, memory_order_relaxed);
+    _Atomic uintptr_t *tf = ts_ptr_thread_free(seg, p);
+    uintptr_t old = atomic_load_explicit(tf, memory_order_relaxed);
     for (;;) {
         if (ts_unlikely(old & TS_TF_BUSY)) {
             /* Someone is handing a block of this page to the heap. That is
              * a handful of instructions; wait rather than queue behind. */
             sched_yield();
-            old = atomic_load_explicit(&page->thread_free, memory_order_relaxed);
+            old = atomic_load_explicit(tf, memory_order_relaxed);
             continue;
         }
         if (ts_unlikely(old == TS_TF_FULL)) {
@@ -220,7 +221,7 @@ void ts_heap_free_remote(ts_segment_t *seg, ts_page_t *page, void *p) {
              * once, and pushes after us go to the page as normal. Acquire
              * pairs with the release in ts_page_mark_full: seg->heap is
              * the heap that flagged the page. */
-            if (atomic_compare_exchange_weak_explicit(&page->thread_free, &old, TS_TF_BUSY,
+            if (atomic_compare_exchange_weak_explicit(tf, &old, TS_TF_BUSY,
                                                       memory_order_acquire, memory_order_relaxed))
                 break;
             continue;
@@ -229,7 +230,7 @@ void ts_heap_free_remote(ts_segment_t *seg, ts_page_t *page, void *p) {
         /* Release: the owner's acquire in ts_page_collect must see b->next.
          * After this succeeds the block, and maybe the whole page, may be
          * reused or unmapped at once, so nothing below touches them. */
-        if (atomic_compare_exchange_weak_explicit(&page->thread_free, &old, (uintptr_t)b,
+        if (atomic_compare_exchange_weak_explicit(tf, &old, (uintptr_t)b,
                                                   memory_order_release, memory_order_relaxed))
             return;
     }
@@ -243,14 +244,14 @@ void ts_heap_free_remote(ts_segment_t *seg, ts_page_t *page, void *p) {
     } while (!atomic_compare_exchange_weak_explicit(&heap->delayed_free, &head, b,
                                                     memory_order_release, memory_order_relaxed));
     /* Release: whoever sees BUSY clear also sees the push above. */
-    atomic_fetch_and_explicit(&page->thread_free, ~TS_TF_BUSY, memory_order_release);
+    atomic_fetch_and_explicit(tf, ~TS_TF_BUSY, memory_order_release);
 }
 
 /* Wait until no remote freer is between flagging `page` BUSY and clearing
  * it again. Acquire, so its push to delayed_free is visible afterwards. */
 static uintptr_t wait_not_busy(ts_page_t *page) {
     uintptr_t tf;
-    while ((tf = atomic_load_explicit(&page->thread_free, memory_order_acquire)) & TS_TF_BUSY)
+    while ((tf = atomic_load_explicit(ts_page_thread_free(page), memory_order_acquire)) & TS_TF_BUSY)
         sched_yield();
     return tf;
 }
@@ -290,7 +291,7 @@ static void page_stop_delayed(ts_page_t *page) {
     while (old & TS_TF_FULL) {
         /* FULL is only set on an empty list, so this is FULL -> 0. A freer
          * that wins the race to BUSY first makes us wait for it. */
-        if (atomic_compare_exchange_weak_explicit(&page->thread_free, &old, old & ~TS_TF_FULL,
+        if (atomic_compare_exchange_weak_explicit(ts_page_thread_free(page), &old, old & ~TS_TF_FULL,
                                                   memory_order_acquire, memory_order_relaxed))
             return;
         if (old & TS_TF_BUSY)

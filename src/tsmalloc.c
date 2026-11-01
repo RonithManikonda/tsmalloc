@@ -167,8 +167,7 @@ void *ts_malloc(size_t size) {
 static TS_NOINLINE void free_slow(void *region, void *p) {
     uint32_t kind = region_kind(region);
     if (ts_likely(kind == TS_KIND_SEGMENT)) {
-        ts_segment_t *seg = region;
-        ts_heap_free_remote(seg, ts_ptr_page(seg, p), p);
+        ts_heap_free_remote(region, p);
     } else if (kind == TS_KIND_LARGE) {
         large_free(region, p);
     } else {

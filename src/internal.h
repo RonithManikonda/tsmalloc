@@ -37,6 +37,14 @@ _Static_assert(TS_SMALL_MAX % TS_ALIGN == 0, "small sizes stay aligned");
  * metadata overhead and the per-page free lists stop paying off. */
 _Static_assert(TS_SMALL_MAX * 4 <= TS_PAGE_SIZE, "small blocks pack into pages");
 
+/* Cache line size, for keeping data written by different threads apart.
+ * Apple silicon uses 128-byte lines; 64 everywhere else we run. */
+#if defined(__APPLE__) && defined(__aarch64__)
+#define TS_CACHE_LINE 128
+#else
+#define TS_CACHE_LINE 64
+#endif
+
 /* ---- Compiler helpers ------------------------------------------------------ */
 #define ts_likely(x)   __builtin_expect(!!(x), 1)
 #define ts_unlikely(x) __builtin_expect(!!(x), 0)

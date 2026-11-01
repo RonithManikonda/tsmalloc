@@ -67,9 +67,15 @@ struct ts_heap_s {
     unsigned seg_cache_count;
 
     /* Remote frees into full pages (see above). Many pushers, and only the
-     * owner takes, always the whole list at once, so there is no ABA. */
-    _Atomic(ts_block_t *) delayed_free;
+     * owner takes, always the whole list at once, so there is no ABA. The
+     * only field other threads write, so it gets a cache line to itself
+     * instead of sharing one with spare[] or the segment lists. */
+    _Alignas(TS_CACHE_LINE) _Atomic(ts_block_t *) delayed_free;
+    char pad_[TS_CACHE_LINE - sizeof(ts_block_t *)];
 };
+
+_Static_assert(offsetof(ts_heap_t, delayed_free) % TS_CACHE_LINE == 0,
+               "delayed_free starts a cache line");
 
 /* Set up an empty heap with no owning thread. (A `{0}` heap works for
  * everything but the direct slots, which only the malloc fast path reads.) */
@@ -95,7 +101,7 @@ void ts_heap_page_freed(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page);
 /* Return a block of `seg` from any thread other than its owner (or when it
  * has none). Lock-free, except for waiting out another freer that is busy
  * handing a block of the same page to the heap. */
-void ts_heap_free_remote(ts_segment_t *seg, ts_page_t *page, void *p);
+void ts_heap_free_remote(ts_segment_t *seg, void *p);
 
 /* Owner only: free the blocks on `delayed_free`, re-queueing their pages.
  * Returns how many there were. ts_heap_malloc_class calls this itself
