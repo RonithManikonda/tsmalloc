@@ -19,8 +19,8 @@ static int check_fill(const unsigned char *p, size_t n, unsigned seed) {
 }
 
 TEST(large_sizes_are_aligned_and_fully_usable) {
-    static const size_t sizes[] = {TS_SMALL_MAX + 1, 20000, 65536, 100003,
-                                   1 << 20, (8 << 20) + 7};
+    static const size_t sizes[] = {TS_MEDIUM_MAX + 1, 600000, 1 << 20, (1 << 20) + 3,
+                                   4 << 20, (8 << 20) + 7};
     for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
         unsigned char *p = ts_malloc(sizes[i]);
         REQUIRE(p != NULL);
@@ -37,14 +37,16 @@ TEST(large_sizes_are_aligned_and_fully_usable) {
     }
 }
 
-TEST(small_boundary_still_works) {
-    for (size_t size = TS_SMALL_MAX - 32; size <= TS_SMALL_MAX + 32; size++) {
-        unsigned char *p = ts_malloc(size);
-        REQUIRE(p != NULL);
-        CHECK(ts_usable_size(p) >= size);
-        fill(p, ts_usable_size(p), 7);
-        ts_free(p);
-    }
+TEST(small_and_medium_boundaries_still_work) {
+    static const size_t edges[] = {TS_SMALL_MAX, TS_MEDIUM_MAX};
+    for (size_t e = 0; e < 2; e++)
+        for (size_t size = edges[e] - 32; size <= edges[e] + 32; size++) {
+            unsigned char *p = ts_malloc(size);
+            REQUIRE(p != NULL);
+            CHECK(ts_usable_size(p) >= size);
+            fill(p, ts_usable_size(p), 7);
+            ts_free(p);
+        }
 }
 
 TEST(calloc_large_is_zero_and_overflow_fails) {
@@ -99,7 +101,7 @@ TEST(realloc_large_shrink_by_little_stays_in_place) {
 
 TEST(aligned_large) {
     for (size_t align = 16; align <= ((size_t)1 << 21); align <<= 1) {
-        size_t size = TS_SMALL_MAX + 100;
+        size_t size = TS_MEDIUM_MAX + 100;
         unsigned char *p = ts_aligned_alloc(align, size);
         REQUIRE(p != NULL);
         CHECK(((uintptr_t)p & (align - 1)) == 0);

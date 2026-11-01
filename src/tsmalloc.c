@@ -3,9 +3,10 @@
  *
  * Every pointer we hand out is found from its address alone:
  *
- *   - small (<= TS_SMALL_MAX): a block in a page of a 4 MiB segment, with no
- *     per-block header. Masking the pointer gives the segment, and the
- *     segment's page descriptors give the block size.
+ *   - small and medium (<= TS_MEDIUM_MAX): a block in a page, or a span of
+ *     pages, of a 4 MiB segment, with no per-block header. Masking the
+ *     pointer gives the segment, and the segment's page descriptors give
+ *     the block size.
  *   - large: its own mapping, aligned to the segment size, with a 16-byte
  *     ts_large_t at the start. Masking the pointer finds that too.
  *
@@ -157,7 +158,7 @@ static TS_NOINLINE void bad_pointer(void) {
 }
 
 void *ts_malloc(size_t size) {
-    if (ts_likely(size <= TS_SMALL_MAX))
+    if (ts_likely(size <= TS_MEDIUM_MAX))
         return small_alloc(size);
     return large_alloc(size, TS_ALIGN);
 }
@@ -223,10 +224,10 @@ void *ts_calloc(size_t count, size_t size) {
         errno = ENOMEM;
         return NULL;
     }
-    if (total > TS_SMALL_MAX)
+    if (total > TS_MEDIUM_MAX)
         return large_alloc(total, TS_ALIGN); /* fresh mmap memory is zero */
     void *p = small_alloc(total);
-    /* Small blocks are recycled, and even never-used ones have a free-list
+    /* Heap blocks are recycled, and even never-used ones have a free-list
      * link written into their first word, so they always need clearing. */
     if (p != NULL)
         memset(p, 0, total);
@@ -274,7 +275,7 @@ void *ts_realloc(void *p, size_t size) {
 
     ts_large_t *h = region;
     size_t old = large_usable(h);
-    if (size <= old && size > TS_SMALL_MAX) {
+    if (size <= old && size > TS_MEDIUM_MAX) {
         large_shrink(h, p, size);
         return p;
     }
@@ -290,7 +291,7 @@ static void *aligned_alloc_checked(size_t alignment, size_t size) {
         if (cls < TS_NUM_CLASSES)
             return small_alloc_class(cls);
     }
-    /* Bigger alignments, or sizes past the small classes: a mapping of its
+    /* Bigger alignments, or sizes past the heap classes: a mapping of its
      * own, over-allocated by the alignment so the block can slide up. */
     return large_alloc(size, alignment);
 }

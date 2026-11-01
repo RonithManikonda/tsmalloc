@@ -3,13 +3,16 @@
 /* Block size of each class. Classes 0-7 are 16 B apart (16..128); after that
  * every power-of-two range (128, 256], (256, 512], ... is split into four
  * equal steps, so a request never wastes more than 25% of its size above
- * 128 B. */
+ * 128 B. The last 20 are the medium classes, served from spans. */
 const uint32_t ts_class_sizes[TS_NUM_CLASSES] = {
     16, 32, 48, 64, 80, 96, 112, 128,
     160, 192, 224, 256, 320, 384, 448, 512,
     640, 768, 896, 1024, 1280, 1536, 1792, 2048,
     2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192,
     10240, 12288, 14336, 16384,
+    20480, 24576, 28672, 32768, 40960, 49152, 57344, 65536,
+    81920, 98304, 114688, 131072, 163840, 196608, 229376, 262144,
+    327680, 393216, 458752, 524288,
 };
 
 /* ts_class_lut[(size + 15) / 16] = class for sizes up to TS_LUT_MAX.

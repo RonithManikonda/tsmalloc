@@ -21,8 +21,17 @@
 #define TS_PAGE_SIZE  ((size_t)1 << TS_PAGE_SHIFT)
 #define TS_PAGES_PER_SEGMENT (TS_SEGMENT_SIZE / TS_PAGE_SIZE)
 
-/* Largest size served from pages; anything above goes to the large path. */
+/* Largest size served from single pages. */
 #define TS_SMALL_MAX ((size_t)16 * 1024)
+
+/* Largest size served from a heap at all. Medium sizes (TS_SMALL_MAX ..
+ * TS_MEDIUM_MAX) come from spans of several pages; anything above goes to
+ * the large path, an mmap of its own. */
+#define TS_MEDIUM_MAX ((size_t)512 * 1024)
+
+/* Most pages a medium span takes. Enough for a few of the biggest blocks
+ * while still leaving room for several spans in a segment. */
+#define TS_SPAN_MAX_PAGES 16
 
 /* Every block is at least this aligned (what malloc must guarantee). */
 #define TS_ALIGN ((size_t)16)
@@ -36,6 +45,12 @@ _Static_assert(TS_SMALL_MAX % TS_ALIGN == 0, "small sizes stay aligned");
 /* At least 4 blocks of the biggest small class per page, or a page is mostly
  * metadata overhead and the per-page free lists stop paying off. */
 _Static_assert(TS_SMALL_MAX * 4 <= TS_PAGE_SIZE, "small blocks pack into pages");
+/* The biggest span holds two of the biggest blocks, or one when it starts
+ * on page 0 and loses the header's 4 KiB (checked in segment.h's terms by
+ * test_size_class). */
+_Static_assert(TS_MEDIUM_MAX * 2 <= TS_SPAN_MAX_PAGES * TS_PAGE_SIZE,
+               "the biggest span holds two medium blocks");
+_Static_assert(TS_SPAN_MAX_PAGES <= TS_PAGES_PER_SEGMENT, "spans fit in a segment");
 
 /* Cache line size, for keeping data written by different threads apart.
  * Apple silicon uses 128-byte lines; 64 everywhere else we run. */

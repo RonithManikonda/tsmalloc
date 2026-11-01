@@ -132,11 +132,11 @@ TEST(realloc_large_shrink_unmaps_tail_in_place) {
     unsigned char *p = ts_malloc(1 << 20);
     REQUIRE(p != NULL);
     fill(p, 1 << 20, 5);
-    unsigned char *q = ts_realloc(p, 100000);
+    unsigned char *q = ts_realloc(p, 600000);
     CHECK(q == p);
-    CHECK(check_fill(q, 100000, 5));
+    CHECK(check_fill(q, 600000, 5));
     size_t usable = ts_usable_size(q);
-    CHECK(usable >= 100000 && usable < 100000 + ps);
+    CHECK(usable >= 600000 && usable < 600000 + ps);
     /* Growing back within the remaining pages also stays put. */
     CHECK(ts_realloc(q, usable) == q);
     ts_free(q);

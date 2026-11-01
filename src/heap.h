@@ -81,7 +81,7 @@ _Static_assert(offsetof(ts_heap_t, delayed_free) % TS_CACHE_LINE == 0,
  * everything but the direct slots, which only the malloc fast path reads.) */
 void ts_heap_init(ts_heap_t *heap);
 
-/* Block of at least `size` bytes (size <= TS_SMALL_MAX), or NULL with errno
+/* Block of at least `size` bytes (size <= TS_MEDIUM_MAX), or NULL with errno
  * set when the OS is out of memory. */
 void *ts_heap_malloc_small(ts_heap_t *heap, size_t size);
 

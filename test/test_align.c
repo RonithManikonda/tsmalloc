@@ -12,7 +12,8 @@ static int from_segment(const void *p) {
 
 TEST(every_alignment_and_size) {
     static const size_t sizes[] = {1, 8, 16, 24, 100, 1000, 4096, 5000,
-                                   TS_SMALL_MAX, TS_SMALL_MAX + 1, 300000};
+                                   TS_SMALL_MAX, TS_SMALL_MAX + 1, 300000,
+                                   TS_MEDIUM_MAX, TS_MEDIUM_MAX + 1};
     for (size_t align = 8; align <= ((size_t)1 << 20); align <<= 1) {
         for (size_t si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
             size_t size = sizes[si];
@@ -61,7 +62,8 @@ TEST(aligned_class_picks_smallest_multiple) {
     CHECK_EQ(ts_class_size(ts_size_to_class_aligned(130, 32)), 160);
     CHECK_EQ(ts_class_size(ts_size_to_class_aligned(130, 64)), 192);
     CHECK_EQ(ts_class_size(ts_size_to_class_aligned(5000, 4096)), 8192);
-    CHECK_EQ(ts_size_to_class_aligned(TS_SMALL_MAX + 1, 16), TS_NUM_CLASSES);
+    CHECK_EQ(ts_class_size(ts_size_to_class_aligned(TS_SMALL_MAX + 1, 4096)), 20480);
+    CHECK_EQ(ts_size_to_class_aligned(TS_MEDIUM_MAX + 1, 16), TS_NUM_CLASSES);
     for (size_t align = 16; align <= 4096; align <<= 1)
         for (size_t size = 1; size <= TS_SMALL_MAX; size += 61) {
             unsigned cls = ts_size_to_class_aligned(size, align);

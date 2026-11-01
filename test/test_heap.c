@@ -3,6 +3,8 @@
 #include "heap.h"
 #include "tsmalloc.h"
 
+#include <pthread.h>
+
 /* Tests drive their own heap so they can look at its state; the last test
  * goes through the public API. */
 
@@ -385,6 +387,100 @@ TEST(public_free_rejoins_and_empties_pages) {
     /* All but the spare page of the class went back to their segment. */
     CHECK(live_after + 3 <= live_before);
     CHECK(direct_in_sync(heap));
+}
+
+/* ---- Medium sizes ------------------------------------------------------ */
+
+/* Medium blocks come from multi-page spans. Fill several spans of a few
+ * classes, tag every word, and check nothing overlaps, every byte of a
+ * block maps back to its span's first descriptor, and freeing gives the
+ * pages back. */
+TEST(medium_blocks_live_in_spans) {
+    static const size_t sizes[] = {TS_SMALL_MAX + 1, 50000, 131072, 300000, TS_MEDIUM_MAX};
+    enum { PER = 24 };
+    static size_t *mb[PER];
+    for (size_t si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+        ts_heap_t heap = {0};
+        size_t size = sizes[si];
+        unsigned cls = ts_size_to_class(size);
+        size_t bsize = ts_class_size(cls);
+        for (size_t i = 0; i < PER; i++) {
+            mb[i] = ts_heap_malloc_small(&heap, size);
+            REQUIRE(mb[i] != NULL);
+            ts_segment_t *seg = ts_ptr_segment(mb[i]);
+            ts_page_t *page = ts_ptr_page(seg, mb[i]);
+            CHECK_EQ(page->in_use, TS_PAGE_USED);
+            CHECK_EQ(page->span_pages, ts_class_span_pages(cls));
+            CHECK_EQ(page->block_size, bsize);
+            /* The last byte is in the same span, so free finds the same
+             * descriptor wherever the pointer it gets came from. */
+            CHECK(ts_ptr_page(seg, (uint8_t *)mb[i] + bsize - 1) == page);
+            CHECK((uint8_t *)mb[i] + bsize <= ts_page_start(seg, page) + ts_page_usable(page));
+            for (size_t w = 0; w < bsize / sizeof(size_t); w += 512)
+                mb[i][w] = i;
+        }
+        size_t bad = 0;
+        for (size_t i = 0; i < PER; i++)
+            for (size_t w = 0; w < bsize / sizeof(size_t); w += 512)
+                bad += mb[i][w] != i;
+        CHECK_EQ(bad, 0);
+        for (size_t i = 0; i < PER; i++)
+            free_block(&heap, mb[i]);
+        /* Only the class's spare span is left. */
+        CHECK(used_pages(&heap) <= ts_class_span_pages(cls));
+        release_all(&heap);
+    }
+}
+
+/* The point of spans: a medium malloc/free loop maps nothing, where each
+ * one used to be an mmap and an munmap. */
+TEST(medium_loop_maps_nothing) {
+    void *keep = ts_malloc(200000);
+    REQUIRE(keep != NULL);
+    CHECK(*(uint32_t *)ts_ptr_segment(keep) == TS_KIND_SEGMENT);
+    size_t mapped = ts_segment_count();
+    for (int i = 0; i < 2000; i++) {
+        size_t size = TS_SMALL_MAX + 1 + (size_t)(i * 7919) % (TS_MEDIUM_MAX - TS_SMALL_MAX);
+        unsigned char *p = ts_malloc(size);
+        REQUIRE(p != NULL);
+        CHECK_EQ(ts_usable_size(p), ts_class_size(ts_size_to_class(size)));
+        p[0] = p[size - 1] = 0x77;
+        ts_free(p);
+    }
+    /* Twenty classes can each keep a spare span, which may take a couple
+     * of segments, but not one per iteration. */
+    CHECK(ts_segment_count() <= mapped + 4);
+    ts_free(keep);
+}
+
+static void *free_them(void *arg) {
+    void **ps = arg;
+    for (int i = 0; i < 16; i++)
+        ts_free(ps[i]);
+    return NULL;
+}
+
+/* Remote frees of medium blocks land on the span's thread_free list (or
+ * the heap's delayed list, for a full span) and come back to the owner:
+ * rounds of "allocate here, free on another thread" must not grow. */
+TEST(medium_remote_free_comes_back) {
+    void *ps[16];
+    size_t mapped = 0;
+    for (int round = 0; round < 50; round++) {
+        for (int i = 0; i < 16; i++) {
+            ps[i] = ts_malloc(100000);
+            REQUIRE(ps[i] != NULL);
+            memset(ps[i], i, 100000);
+        }
+        pthread_t t;
+        REQUIRE(pthread_create(&t, NULL, free_them, ps) == 0);
+        pthread_join(t, NULL);
+        if (round == 2)
+            mapped = ts_segment_count();
+    }
+    /* A segment or two of slack for the other thread's heap coming and
+     * going, nothing proportional to the 50 rounds (each is ~1.6 MiB). */
+    CHECK(ts_segment_count() <= mapped + 2);
 }
 
 TEST(public_small_blocks_have_no_header) {

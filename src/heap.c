@@ -97,12 +97,13 @@ static void segment_cache_release(ts_heap_t *heap) {
         ts_segment_free(seg);
 }
 
-/* A page from any owned segment with room, else from a cached or new
- * segment. */
+/* A page (or span, for medium classes) from any owned segment with room,
+ * else from a cached or new segment. */
 static ts_page_t *page_fresh(ts_heap_t *heap, unsigned cls) {
+    size_t npages = ts_class_span_pages(cls);
     ts_page_t *page = NULL;
     for (ts_segment_t *seg = heap->segments; seg != NULL; seg = seg->next) {
-        page = ts_segment_page_alloc(seg);
+        page = ts_segment_span_alloc(seg, npages);
         if (page != NULL)
             break;
     }
@@ -116,7 +117,7 @@ static ts_page_t *page_fresh(ts_heap_t *heap, unsigned cls) {
             atomic_store_explicit(&seg->thread_id, heap->thread_id, memory_order_relaxed);
         }
         segment_link(heap, seg);
-        page = ts_segment_page_alloc(seg);
+        page = ts_segment_span_alloc(seg, npages);
     }
     page->size_class = (uint8_t)cls;
     ts_page_init(page, ts_class_size(cls));

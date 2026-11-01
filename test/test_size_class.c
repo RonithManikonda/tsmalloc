@@ -1,5 +1,6 @@
 #include "test.h"
 
+#include "segment.h"
 #include "size_class.h"
 
 TEST(class_sizes_are_increasing_multiples_of_16) {
@@ -9,11 +10,12 @@ TEST(class_sizes_are_increasing_multiples_of_16) {
             CHECK(ts_class_size(c) > ts_class_size(c - 1));
     }
     CHECK_EQ(ts_class_size(0), 16);
-    CHECK_EQ(ts_class_size(TS_NUM_CLASSES - 1), TS_SMALL_MAX);
+    CHECK_EQ(ts_class_size(TS_NUM_SMALL_CLASSES - 1), TS_SMALL_MAX);
+    CHECK_EQ(ts_class_size(TS_NUM_CLASSES - 1), TS_MEDIUM_MAX);
 }
 
 TEST(every_size_maps_to_smallest_fitting_class) {
-    for (size_t size = 1; size <= TS_SMALL_MAX; size++) {
+    for (size_t size = 1; size <= TS_MEDIUM_MAX; size++) {
         unsigned c = ts_size_to_class(size);
         REQUIRE(c < TS_NUM_CLASSES);
         CHECK(ts_class_size(c) >= size);
@@ -26,7 +28,7 @@ TEST(every_size_maps_to_smallest_fitting_class) {
 TEST(waste_is_at_most_a_quarter_above_128) {
     /* Below 128 B the 16 B spacing dominates (17 B -> 32 B), which is the
      * usual trade for keeping small classes few and aligned. */
-    for (size_t size = 128; size <= TS_SMALL_MAX; size++) {
+    for (size_t size = 128; size <= TS_MEDIUM_MAX; size++) {
         size_t got = ts_class_size(ts_size_to_class(size));
         CHECK((got - size) * 4 <= size);
     }
@@ -43,5 +45,22 @@ TEST(power_of_two_boundaries) {
     CHECK_EQ(ts_class_size(ts_size_to_class(1024)), 1024);
     CHECK_EQ(ts_class_size(ts_size_to_class(1025)), 1280);
     CHECK_EQ(ts_class_size(ts_size_to_class(8193)), 10240);
-    CHECK_EQ(ts_size_to_class(TS_SMALL_MAX), TS_NUM_CLASSES - 1);
+    CHECK_EQ(ts_size_to_class(TS_SMALL_MAX), TS_NUM_SMALL_CLASSES - 1);
+    CHECK_EQ(ts_class_size(ts_size_to_class(TS_SMALL_MAX + 1)), 20480);
+    CHECK_EQ(ts_size_to_class(TS_MEDIUM_MAX), TS_NUM_CLASSES - 1);
+}
+
+TEST(span_pages_per_class) {
+    for (unsigned c = 0; c < TS_NUM_SMALL_CLASSES; c++)
+        CHECK_EQ(ts_class_span_pages(c), 1);
+    for (unsigned c = TS_NUM_SMALL_CLASSES; c < TS_NUM_CLASSES; c++) {
+        size_t pages = ts_class_span_pages(c);
+        CHECK(pages >= 2 && pages <= TS_SPAN_MAX_PAGES);
+        /* Two blocks per span, or at least one when the span starts on
+         * page 0 and is 4 KiB short. */
+        CHECK(pages * TS_PAGE_SIZE >= 2 * ts_class_size(c));
+        CHECK(pages * TS_PAGE_SIZE - TS_PAGE0_OFFSET >= ts_class_size(c));
+        if (c > TS_NUM_SMALL_CLASSES)
+            CHECK(pages >= ts_class_span_pages(c - 1));
+    }
 }

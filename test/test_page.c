@@ -87,7 +87,7 @@ static void fill_and_verify(ts_segment_t *seg, size_t index, unsigned cls) {
 TEST(every_class_fills_a_page_without_overlap) {
     ts_segment_t *seg = ts_segment_alloc();
     REQUIRE(seg != NULL);
-    for (unsigned cls = 0; cls < TS_NUM_CLASSES; cls++)
+    for (unsigned cls = 0; cls < TS_NUM_SMALL_CLASSES; cls++) /* single pages */
         for (size_t i = 0; i < sizeof page_indices / sizeof page_indices[0]; i++)
             fill_and_verify(seg, page_indices[i] + cls % 3, cls);
     /* Page descriptors in the header were never touched by block writes. */
