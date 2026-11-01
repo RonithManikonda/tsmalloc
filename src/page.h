@@ -49,7 +49,8 @@ TS_INLINE uint8_t *ts_page_block_at(const ts_page_t *page, size_t i) {
 /* Owner only: move blocks other threads freed into `free`. Returns how many. */
 size_t ts_page_collect(ts_page_t *page);
 
-/* ts_page_alloc once `free` is empty: remote frees first, then new blocks. */
+/* ts_page_alloc once `free` is empty: freed blocks first (local and remote),
+ * then new ones. */
 void *ts_page_alloc_slow(ts_page_t *page);
 
 /* A block from this page, or NULL when every block is in use. */
@@ -75,11 +76,12 @@ TS_INLINE int ts_page_mark_full(ts_page_t *page) {
     return expected == TS_TF_FULL; /* still flagged from the last time */
 }
 
-/* Return a block that came from ts_page_alloc on this page. Owner only. */
+/* Return a block that came from ts_page_alloc on this page. Owner only.
+ * It goes on `local_free`; malloc sees it once `free` runs dry. */
 TS_INLINE void ts_page_free(ts_page_t *page, void *p) {
     ts_block_t *b = p;
-    b->next = page->free;
-    page->free = b;
+    b->next = page->local_free;
+    page->local_free = b;
     page->used--;
 }
 
@@ -88,7 +90,7 @@ TS_INLINE int ts_page_is_empty(const ts_page_t *page) {
 }
 
 TS_INLINE int ts_page_is_full(const ts_page_t *page) {
-    return page->free == NULL && page->reserved == page->capacity;
+    return page->free == NULL && page->local_free == NULL && page->reserved == page->capacity;
 }
 
 #endif /* TS_PAGE_H */

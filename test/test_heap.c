@@ -119,16 +119,53 @@ TEST(empty_pages_return_to_segment) {
     release_all(&heap);
 }
 
+/* A malloc/free loop doesn't get the same block straight back (frees wait
+ * on local_free until `free` runs dry), but it stays inside the first
+ * chunk the page linked in: it cycles through those blocks and the ones it
+ * freed, and never carves new memory. */
 TEST(malloc_free_loop_reuses_block) {
     ts_heap_t heap = {0};
-    void *first = ts_heap_malloc_small(&heap, 48);
+    uint8_t *first = ts_heap_malloc_small(&heap, 48);
+    REQUIRE(first != NULL);
+    ts_page_t *page = ts_ptr_page(ts_ptr_segment(first), first);
     free_block(&heap, first);
+    uint16_t reserved = page->reserved;
     for (int i = 0; i < 1000; i++) {
-        void *p = ts_heap_malloc_small(&heap, 48);
-        CHECK(p == first);
+        uint8_t *p = ts_heap_malloc_small(&heap, 48);
+        CHECK(p >= first && p < first + TS_PAGE_EXTEND_BYTES);
         free_block(&heap, p);
     }
+    CHECK_EQ(page->reserved, reserved);
     CHECK_EQ(used_pages(&heap), 1);
+    release_all(&heap);
+}
+
+/* The reason for local_free: an owner that frees as fast as it allocates
+ * must still run its page's `free` list dry now and then, which is when
+ * blocks other threads freed into the page are taken back. With a single
+ * list the loop below would recycle one block forever and the remote one
+ * would never come back. */
+TEST(steady_owner_still_collects_remote_frees) {
+    ts_heap_t heap = {0};
+    void *keep = ts_heap_malloc_small(&heap, 64);
+    void *remote = ts_heap_malloc_small(&heap, 64);
+    REQUIRE(keep != NULL && remote != NULL);
+    ts_segment_t *seg = ts_ptr_segment(remote);
+    ts_page_t *page = ts_ptr_page(seg, remote);
+    ts_heap_free_remote(seg, page, remote); /* as if from another thread */
+    CHECK(atomic_load(&page->thread_free) == (uintptr_t)remote);
+    CHECK_EQ(page->used, 2);
+
+    int seen = 0;
+    for (int i = 0; i < 1000; i++) {
+        void *p = ts_heap_malloc_small(&heap, 64);
+        seen |= p == remote;
+        free_block(&heap, p);
+    }
+    CHECK(seen);
+    CHECK_EQ(atomic_load(&page->thread_free), 0);
+    CHECK_EQ(page->used, 1);
+    free_block(&heap, keep);
     release_all(&heap);
 }
 

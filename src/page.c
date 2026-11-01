@@ -6,6 +6,7 @@ void ts_page_init(ts_page_t *page, size_t block_size) {
     page->reserved = 0;
     page->used = 0;
     page->free = NULL;
+    page->local_free = NULL;
     /* No other thread can hold a block of a page being set up, so nothing
      * races with this store. */
     atomic_store_explicit(&page->thread_free, 0, memory_order_relaxed);
@@ -35,8 +36,17 @@ size_t ts_page_collect(ts_page_t *page) {
 
 void *ts_page_alloc_slow(ts_page_t *page) {
     /* Reuse blocks that came back before carving new ones: they are warm
-     * in some cache, and an untouched block stays untouched. */
-    if (ts_page_collect(page) == 0) {
+     * in some cache, and an untouched block stays untouched. Our own frees
+     * become the new `free` list, and remote ones go in front of them.
+     *
+     * Taking remote frees only here (not on every malloc) keeps the atomic
+     * off the fast path; sending local frees to `local_free` is what makes
+     * sure we get here regularly anyway. With a single list, a page whose
+     * owner frees as fast as it allocates would never run dry, and blocks
+     * other threads freed into it would sit on thread_free forever. */
+    page->free = page->local_free;
+    page->local_free = NULL;
+    if (ts_page_collect(page) == 0 && page->free == NULL) {
         if (page->reserved == page->capacity)
             return NULL;
         ts_page_extend(page);

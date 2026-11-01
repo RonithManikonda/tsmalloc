@@ -20,18 +20,34 @@ static int check_fill(const unsigned char *p, size_t n, unsigned seed) {
 }
 
 TEST(calloc_clears_recycled_small_blocks) {
-    /* Dirty a block, free it, and make sure calloc's copy comes back zero
-     * even though it is the same memory. */
-    unsigned char *p = ts_malloc(200);
-    REQUIRE(p != NULL);
-    memset(p, 0xEE, ts_usable_size(p));
-    ts_free(p);
-    unsigned char *q = ts_calloc(25, 8);
-    REQUIRE(q != NULL);
-    CHECK(q == p);
-    for (size_t i = 0; i < 200; i++)
-        CHECK_EQ(q[i], 0);
-    ts_free(q);
+    /* Dirty a few pages' worth of blocks and free them; calloc then has to
+     * hand some of that same memory back (freed blocks are reused before
+     * new ones), and every byte must read zero. */
+    enum { N = 1000 };
+    static unsigned char *ps[N];
+    for (size_t i = 0; i < N; i++) {
+        ps[i] = ts_malloc(200);
+        REQUIRE(ps[i] != NULL);
+        memset(ps[i], 0xEE, ts_usable_size(ps[i]));
+    }
+    unsigned char *lo = ps[0], *hi = ps[0];
+    for (size_t i = 0; i < N; i++) {
+        lo = ps[i] < lo ? ps[i] : lo;
+        hi = ps[i] > hi ? ps[i] : hi;
+        ts_free(ps[i]);
+    }
+    size_t recycled = 0, dirty = 0;
+    for (size_t i = 0; i < N; i++) {
+        ps[i] = ts_calloc(25, 8);
+        REQUIRE(ps[i] != NULL);
+        recycled += ps[i] >= lo && ps[i] <= hi;
+        for (size_t j = 0; j < 200; j++)
+            dirty += ps[i][j] != 0;
+    }
+    CHECK(recycled > N / 2);
+    CHECK_EQ(dirty, 0);
+    for (size_t i = 0; i < N; i++)
+        ts_free(ps[i]);
 }
 
 TEST(calloc_overflow_sets_enomem) {

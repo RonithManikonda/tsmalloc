@@ -194,8 +194,8 @@ void ts_free(void *p) {
                   atomic_load_explicit(&seg->thread_id, memory_order_relaxed) == ts_thread_id())) {
         ts_page_t *page = ts_ptr_page(seg, p);
         ts_block_t *b = p;
-        b->next = page->free;
-        page->free = b;
+        b->next = page->local_free;
+        page->local_free = b;
         /* The common case ends here: the page still has live blocks and is
          * on its queue, so there is nothing to fix up. */
         if (ts_likely(--page->used != 0 && page->queued))

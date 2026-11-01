@@ -36,6 +36,10 @@ struct ts_page_s {
     uint16_t used;       /* blocks currently allocated */
     uint32_t block_size;
     ts_block_t *free;    /* blocks ready to hand out */
+    /* Blocks the owner freed. Kept apart from `free` so malloc runs `free`
+     * dry and takes the slow path every so often, which is where remote
+     * frees get collected; see ts_page_alloc_slow. */
+    ts_block_t *local_free;
     /* Blocks freed by other threads, pushed lock-free; the owner splices
      * them into `free` when it runs dry. The low two bits are flags
      * (TS_TF_FULL, TS_TF_BUSY in page.h). */
