@@ -73,6 +73,12 @@ struct ts_segment_s {
     ts_segment_t *next; /* links for whoever owns the segment */
     ts_segment_t *prev;
     uint32_t used_pages;
+    /* Pages that are free but may still hold resident memory, one bit per
+     * page. `dirty_seen` is the copy taken at the last purge sweep: a page
+     * in both has been free for at least a whole sweep period. Reusing a
+     * page clears its bits, which restarts its clock. Owner only. */
+    uint64_t dirty;
+    uint64_t dirty_seen;
     /* span_offset[i]: how far page i is from the first page of the span
      * that covers it (0 for a span's first page and for ordinary pages).
      * Read by every free to find the descriptor of a block; written only
@@ -101,6 +107,7 @@ struct ts_segment_s {
 #define TS_PAGE0_OFFSET ((size_t)4096)
 
 _Static_assert(sizeof(ts_segment_t) <= TS_PAGE0_OFFSET, "segment header fits before page 0 data");
+_Static_assert(TS_PAGES_PER_SEGMENT <= 64, "one bit per page in the dirty masks");
 _Static_assert(offsetof(ts_segment_t, thread_free) % TS_CACHE_LINE == 0,
                "remote-free lists don't share a line with the descriptors");
 /* The segment header ends in the thread_free lines, and page 0 data starts
@@ -124,6 +131,12 @@ ts_page_t *ts_segment_span_alloc(ts_segment_t *seg, size_t npages);
 
 /* Give back a page or a whole span (pass its first descriptor). */
 void ts_segment_page_free(ts_segment_t *seg, ts_page_t *page);
+
+/* Decommit the free pages that have been dirty since the previous call, or
+ * every dirty page if `all` is set. Returns how many pages that was. The
+ * header is safe: page 0's range starts past it, and decommit rounds inward
+ * to whole OS pages. */
+size_t ts_segment_purge(ts_segment_t *seg, int all);
 
 /* Segment containing any address inside it (only meaningful for pointers
  * that came from segments). */

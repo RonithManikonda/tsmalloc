@@ -43,6 +43,12 @@ typedef struct {
  * (plus page faults) every swing; past this, empty segments go back. */
 #define TS_SEGMENT_CACHE_MAX 2
 
+/* Slow-path events between purge sweeps, unless TSMALLOC_PURGE_DELAY says
+ * otherwise. A tick is a malloc that had to leave the fast path or a free
+ * that emptied a page, so a heap that is busy with its existing pages, or
+ * idle, does no purging work at all. */
+#define TS_PURGE_DELAY_DEFAULT 1024
+
 /* One slot per 16 B of request size up to TS_LUT_MAX, like ts_class_lut. */
 #define TS_DIRECT_SLOTS (TS_LUT_MAX / 16 + 1)
 
@@ -65,6 +71,11 @@ struct ts_heap_s {
     ts_segment_t *segments;  /* segments with pages in use */
     ts_segment_t *seg_cache; /* empty segments kept for reuse (via next) */
     unsigned seg_cache_count;
+
+    uint64_t tick;        /* slow-path events so far */
+    uint64_t purge_next;  /* tick of the next sweep; 0 means never */
+    long purge_delay;     /* ticks between sweeps; 0 purges at once, < 0 never */
+    size_t purged_pages;  /* pages decommitted so far */
 
     /* Remote frees into full pages (see above). Many pushers, and only the
      * owner takes, always the whole list at once, so there is no ABA. The
@@ -117,6 +128,23 @@ void ts_heap_abandon(ts_heap_t *heap);
  * if it did. ts_heap_malloc_class calls this before mapping new memory;
  * heaps without an owning thread never adopt. */
 int ts_heap_adopt(ts_heap_t *heap);
+
+/* TSMALLOC_PURGE_DELAY's value, read once: a tick count, 0 to purge as soon
+ * as a page is free, negative to never purge. Heaps take it when set up. */
+long ts_purge_delay(void);
+
+/* What a value of the variable means; `text` may be NULL. Exposed for tests. */
+long ts_parse_purge_delay(const char *text);
+
+/* Change a heap's delay (tests), restarting its sweep timer. */
+void ts_heap_set_purge_delay(ts_heap_t *heap, long delay);
+
+/* Count one slow-path event, sweeping if one is due. Owner only. A sweep
+ * retires spare pages that are still empty, then decommits pages that have
+ * stayed free since the previous sweep, so a page is purged after one to
+ * two periods. Pages kept in use by a spare slot or reused meanwhile are
+ * left alone. */
+void ts_heap_tick(ts_heap_t *heap);
 
 /* Number of abandoned segments, and a way for tests to look at them. The
  * callback runs with the abandoned list locked. */

@@ -28,6 +28,11 @@ size_t ts_segment_count(void) {
     return atomic_load_explicit(&live_segments, memory_order_relaxed);
 }
 
+/* Bits `first` .. `first + n - 1`. */
+static uint64_t page_mask(size_t first, size_t n) {
+    return (n >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << n) - 1)) << first;
+}
+
 ts_page_t *ts_segment_page_alloc(ts_segment_t *seg) {
     return ts_segment_span_alloc(seg, 1);
 }
@@ -57,6 +62,11 @@ ts_page_t *ts_segment_span_alloc(ts_segment_t *seg, size_t npages) {
             seg->span_offset[first + j] = (uint8_t)j;
         }
         seg->used_pages += (uint32_t)npages;
+        /* Nothing to recommit even if these were purged: MADV_FREE'd memory
+         * is simply written to again. */
+        uint64_t mask = page_mask(first, npages);
+        seg->dirty &= ~mask;
+        seg->dirty_seen &= ~mask;
         return page;
     }
     return NULL;
@@ -64,6 +74,7 @@ ts_page_t *ts_segment_span_alloc(ts_segment_t *seg, size_t npages) {
 
 void ts_segment_page_free(ts_segment_t *seg, ts_page_t *page) {
     size_t n = page->span_pages;
+    seg->dirty |= page_mask(page->index, n);
     for (size_t j = 1; j < n; j++) {
         seg->pages[page->index + j].in_use = TS_PAGE_FREE;
         seg->span_offset[page->index + j] = 0;
@@ -71,4 +82,23 @@ void ts_segment_page_free(ts_segment_t *seg, ts_page_t *page) {
     page->in_use = TS_PAGE_FREE;
     page->span_pages = 1;
     seg->used_pages -= (uint32_t)n;
+}
+
+size_t ts_segment_purge(ts_segment_t *seg, int all) {
+    uint64_t stale = all ? seg->dirty : seg->dirty & seg->dirty_seen;
+    seg->dirty &= ~stale;
+    seg->dirty_seen = seg->dirty;
+
+    size_t purged = (size_t)__builtin_popcountll(stale);
+    /* One madvise per run of adjacent pages, not one per page. */
+    while (stale != 0) {
+        size_t first = (size_t)__builtin_ctzll(stale);
+        uint64_t gap = ~(stale >> first);
+        size_t run = gap != 0 ? (size_t)__builtin_ctzll(gap) : 64 - first;
+        stale &= ~page_mask(first, run);
+
+        size_t skip = first == 0 ? TS_PAGE0_OFFSET : 0;
+        ts_os_decommit((char *)seg + (first << TS_PAGE_SHIFT) + skip, (run << TS_PAGE_SHIFT) - skip);
+    }
+    return purged;
 }

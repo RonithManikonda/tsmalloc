@@ -1,7 +1,9 @@
 #include "heap.h"
 
+#include <limits.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdlib.h>
 
 ts_page_t ts_page_empty;
 
@@ -10,6 +12,37 @@ void ts_heap_init(ts_heap_t *heap) {
     for (size_t i = 0; i < TS_DIRECT_SLOTS; i++)
         heap->pages_direct[i] = &ts_page_empty;
     atomic_init(&heap->delayed_free, NULL);
+    ts_heap_set_purge_delay(heap, ts_purge_delay());
+}
+
+long ts_parse_purge_delay(const char *text) {
+    if (text == NULL || *text == '\0')
+        return TS_PURGE_DELAY_DEFAULT;
+    char *end;
+    long value = strtol(text, &end, 10);
+    return *end == '\0' ? value : TS_PURGE_DELAY_DEFAULT;
+}
+
+long ts_purge_delay(void) {
+    /* Racing first callers all compute the same value. getenv and strtol
+     * don't allocate, so this is safe on the way into the first malloc. */
+    static _Atomic long cached = LONG_MIN;
+    long delay = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (delay == LONG_MIN) {
+        delay = ts_parse_purge_delay(getenv("TSMALLOC_PURGE_DELAY"));
+        atomic_store_explicit(&cached, delay, memory_order_relaxed);
+    }
+    return delay;
+}
+
+/* Tick of the sweep after this one. Never 0, which means no sweeps. */
+static uint64_t next_sweep(const ts_heap_t *heap) {
+    return heap->purge_delay < 0 ? 0 : heap->tick + (uint64_t)(heap->purge_delay > 0 ? heap->purge_delay : 1);
+}
+
+void ts_heap_set_purge_delay(ts_heap_t *heap, long delay) {
+    heap->purge_delay = delay;
+    heap->purge_next = next_sweep(heap);
 }
 
 /* Point the direct slots of class `cls` at its queue head. The class covers
@@ -132,6 +165,35 @@ static void page_retire(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
     }
 }
 
+static void heap_purge(ts_heap_t *heap) {
+    heap->purge_next = next_sweep(heap);
+
+    /* A spare that sat empty for a whole period isn't saving any churn. Its
+     * memory goes back like any other page's. It can't have remote frees
+     * pending: those count as used until they are collected. */
+    for (unsigned cls = 0; cls < TS_NUM_CLASSES; cls++) {
+        ts_page_t *spare = heap->spare[cls];
+        if (spare == NULL || !ts_page_is_empty(spare))
+            continue;
+        heap->spare[cls] = NULL;
+        if (spare->queued)
+            queue_remove(heap, cls, spare);
+        page_retire(heap, ts_ptr_segment(spare), spare);
+    }
+
+    int all = heap->purge_delay == 0;
+    for (ts_segment_t *seg = heap->segments; seg != NULL; seg = seg->next)
+        heap->purged_pages += ts_segment_purge(seg, all);
+    for (ts_segment_t *seg = heap->seg_cache; seg != NULL; seg = seg->next)
+        heap->purged_pages += ts_segment_purge(seg, all);
+}
+
+void ts_heap_tick(ts_heap_t *heap) {
+    heap->tick++;
+    if (ts_unlikely(heap->purge_next != 0 && heap->tick >= heap->purge_next))
+        heap_purge(heap);
+}
+
 void *ts_heap_malloc_small(ts_heap_t *heap, size_t size) {
     return ts_heap_malloc_class(heap, ts_size_to_class(size));
 }
@@ -152,6 +214,7 @@ TS_INLINE void *queue_alloc(ts_heap_t *heap, unsigned cls) {
 }
 
 void *ts_heap_malloc_class(ts_heap_t *heap, unsigned cls) {
+    ts_heap_tick(heap);
     void *p = queue_alloc(heap, cls);
     if (ts_likely(p != NULL))
         return p;
@@ -180,28 +243,33 @@ void ts_heap_free_small(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page, voi
     ts_heap_page_freed(heap, seg, page);
 }
 
-void ts_heap_page_freed(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
+static void page_emptied(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
     unsigned cls = page->size_class;
+    /* Keep one empty page per class: otherwise a loop of malloc(n);
+     * free() at a page boundary would set up and tear down a page on
+     * every iteration. The spare slot may point at a page that has
+     * been allocated from since; then this one takes over. */
+    ts_page_t *spare = heap->spare[cls];
+    if (spare == NULL || spare == page || !ts_page_is_empty(spare)) {
+        heap->spare[cls] = page;
+        if (!page->queued)
+            queue_push_front(heap, cls, page);
+        return;
+    }
+    if (page->queued)
+        queue_remove(heap, cls, page);
+    page_retire(heap, seg, page);
+}
 
+void ts_heap_page_freed(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
     if (ts_page_is_empty(page)) {
-        /* Keep one empty page per class: otherwise a loop of malloc(n);
-         * free() at a page boundary would set up and tear down a page on
-         * every iteration. The spare slot may point at a page that has
-         * been allocated from since; then this one takes over. */
-        ts_page_t *spare = heap->spare[cls];
-        if (spare == NULL || spare == page || !ts_page_is_empty(spare)) {
-            heap->spare[cls] = page;
-            if (!page->queued)
-                queue_push_front(heap, cls, page);
-            return;
-        }
-        if (page->queued)
-            queue_remove(heap, cls, page);
-        page_retire(heap, seg, page);
+        page_emptied(heap, seg, page);
+        /* Last: a sweep may retire this very page. */
+        ts_heap_tick(heap);
         return;
     }
     if (!page->queued)
-        queue_push_front(heap, cls, page);
+        queue_push_front(heap, page->size_class, page);
 }
 
 void ts_heap_free_remote(ts_segment_t *seg, void *p) {

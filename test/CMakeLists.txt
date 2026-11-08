@@ -12,6 +12,10 @@ ts_add_test(test_internal)
 ts_add_test(test_size_class)
 ts_add_test(test_large)
 ts_add_test(test_huge)
+ts_add_test(test_purge)
+# Same binary with a delay in the environment, to check the variable is read.
+add_test(NAME test_purge_env COMMAND test_purge)
+set_tests_properties(test_purge_env PROPERTIES ENVIRONMENT TSMALLOC_PURGE_DELAY=7)
 ts_add_test(test_segment)
 ts_add_test(test_page)
 ts_add_test(test_heap)
@@ -27,3 +31,6 @@ target_compile_definitions(test_bench PRIVATE _POSIX_C_SOURCE=200809L)
 # TS_TEST_SCALE=<n> in the environment makes them n times longer.
 ts_add_test(test_stress)
 set_tests_properties(test_stress PROPERTIES LABELS stress)
+# The harshest purge setting: every page is decommitted the moment it is free.
+add_test(NAME test_stress_purge COMMAND test_stress)
+set_tests_properties(test_stress_purge PROPERTIES LABELS stress ENVIRONMENT TSMALLOC_PURGE_DELAY=0)
