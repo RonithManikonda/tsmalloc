@@ -36,7 +36,8 @@ set(TS_SOURCES
   src/page.c
   src/heap.c
   src/huge.c
-  src/stats.c)
+  src/stats.c
+  src/registry.c)
 # Absolute, because test/ builds a second copy of the library from its own directory.
 list(TRANSFORM TS_SOURCES PREPEND ${PROJECT_SOURCE_DIR}/)
 

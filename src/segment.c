@@ -1,10 +1,17 @@
 #include "segment.h"
 
 #include "os.h"
+#include "registry.h"
 #include "stats.h"
 
 /* Only touched on the slow paths that map and unmap segments. */
 static _Atomic size_t live_segments;
+
+static void segment_unmap(ts_segment_t *seg) {
+    ts_os_free(seg, TS_SEGMENT_SIZE);
+    atomic_fetch_sub_explicit(&live_segments, 1, memory_order_relaxed);
+    TS_STAT_INC(TS_STAT_SEGMENT_UNMAP);
+}
 
 ts_segment_t *ts_segment_alloc(void) {
     ts_segment_t *seg = ts_os_alloc_aligned(TS_SEGMENT_SIZE, TS_SEGMENT_SIZE);
@@ -18,13 +25,16 @@ ts_segment_t *ts_segment_alloc(void) {
         seg->pages[i].index = (uint8_t)i;
         seg->pages[i].span_pages = 1; /* a free page is a span of one */
     }
+    if (!ts_registry_add(seg)) {
+        segment_unmap(seg);
+        return NULL;
+    }
     return seg;
 }
 
 void ts_segment_free(ts_segment_t *seg) {
-    ts_os_free(seg, TS_SEGMENT_SIZE);
-    atomic_fetch_sub_explicit(&live_segments, 1, memory_order_relaxed);
-    TS_STAT_INC(TS_STAT_SEGMENT_UNMAP);
+    ts_registry_remove(seg);
+    segment_unmap(seg);
 }
 
 size_t ts_segment_count(void) {

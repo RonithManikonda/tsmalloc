@@ -21,6 +21,7 @@ add_executable(test_stats_on test_stats.c)
 target_link_libraries(test_stats_on PRIVATE tsmalloc_stats)
 target_include_directories(test_stats_on PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_stats_on COMMAND test_stats_on)
+ts_add_test(test_registry)
 ts_add_test(test_purge)
 # Same binary with a delay in the environment, to check the variable is read.
 add_test(NAME test_purge_env COMMAND test_purge)

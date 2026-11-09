@@ -1,6 +1,7 @@
 #include "huge.h"
 
 #include "os.h"
+#include "registry.h"
 #include "segment.h"
 #include "stats.h"
 
@@ -175,6 +176,10 @@ static void *finish_block(char *base, size_t lead, size_t mapped) {
     h->kind = TS_KIND_LARGE;
     h->lead = (uint32_t)lead;
     h->mapped = mapped;
+    if (!ts_registry_add(h)) {
+        ts_os_free(base, mapped);
+        return NULL; /* errno is ENOMEM */
+    }
     return user;
 }
 
@@ -221,6 +226,7 @@ void ts_huge_free(ts_huge_t *h, void *p) {
     size_t mapped = h->mapped;
     char *base = (char *)p - lead;
 
+    ts_registry_remove(h);
     if (lead > TS_SEGMENT_SIZE || !cacheable(mapped)) {
         ts_os_free(base, mapped);
         TS_STAT_INC(TS_STAT_HUGE_UNMAP);
