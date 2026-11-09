@@ -141,3 +141,77 @@ performance and efficiency cores differ. Treat single cells as rough. The overal
 
 That was the starting point for thread-local heaps (step 18 onward), which take the lock out of the
 common path entirely.
+
+## After fast-path tuning, spans, the huge cache and purging (steps 26–33)
+
+Same machine and script. Compared with the table above, most rows gained 5–20% at higher thread counts
+from the fast-path and cache-line work. `larson` at 1 thread reads lower (90 against 122), but that is
+machine state rather than a regression: a build from before steps 31–33 and the current one both do about
+105 Mops/s when run alternately, and purging on or off makes no measurable difference.
+
+| bench | threads | system Mops/s | ts Mops/s | ts / system |
+|---|---:|---:|---:|---:|
+| cache_scratch | 1 | 4320.12 | 5030.97 | 1.16x |
+| cache_scratch | 2 | 3646.27 | 9861.02 | 2.70x |
+| cache_scratch | 4 | 3844.01 | 17542.90 | 4.56x |
+| cache_scratch | 8 | 9476.08 | 34275.92 | 3.62x |
+| cache_scratch | 14 | 16346.79 | 48837.92 | 2.99x |
+| larson | 1 | 22.18 | 90.32 | 4.07x |
+| larson | 2 | 24.24 | 175.13 | 7.22x |
+| larson | 4 | 24.30 | 314.81 | 12.96x |
+| larson | 8 | 34.55 | 435.87 | 12.62x |
+| larson | 14 | 48.35 | 528.14 | 10.92x |
+| threadtest-1024 | 1 | 48.77 | 245.22 | 5.03x |
+| threadtest-1024 | 2 | 21.51 | 490.68 | 22.81x |
+| threadtest-1024 | 4 | 47.90 | 874.51 | 18.26x |
+| threadtest-1024 | 8 | 33.21 | 1664.59 | 50.12x |
+| threadtest-1024 | 14 | 18.91 | 1769.91 | 93.60x |
+| threadtest-16 | 1 | 61.46 | 289.52 | 4.71x |
+| threadtest-16 | 2 | 53.10 | 570.45 | 10.74x |
+| threadtest-16 | 4 | 94.59 | 1005.53 | 10.63x |
+| threadtest-16 | 8 | 155.62 | 1933.30 | 12.42x |
+| threadtest-16 | 14 | 245.48 | 2161.83 | 8.81x |
+| threadtest-256 | 1 | 63.80 | 286.86 | 4.50x |
+| threadtest-256 | 2 | 46.42 | 566.57 | 12.21x |
+| threadtest-256 | 4 | 88.49 | 1008.06 | 11.39x |
+| threadtest-256 | 8 | 95.51 | 1947.42 | 20.39x |
+| threadtest-256 | 14 | 100.52 | 2165.84 | 21.55x |
+| threadtest-64 | 1 | 60.80 | 286.70 | 4.72x |
+| threadtest-64 | 2 | 136.24 | 567.21 | 4.16x |
+| threadtest-64 | 4 | 86.75 | 1007.56 | 11.61x |
+| threadtest-64 | 8 | 137.54 | 1946.47 | 14.15x |
+| threadtest-64 | 14 | 243.85 | 2140.02 | 8.78x |
+| xmalloc | 2 | 32.77 | 59.04 | 1.80x |
+| xmalloc | 4 | 34.64 | 109.73 | 3.17x |
+| xmalloc | 8 | 25.84 | 104.18 | 4.03x |
+| xmalloc | 14 | 33.68 | 153.24 | 4.55x |
+
+Sizes above 512 KiB aren't in this table. On a single-thread loop that allocates, touches and frees 2 MiB,
+the huge cache does about 2.05 M ops/s, against 14 k ops/s with the cache flushed after each free and
+1.08 M ops/s for libmalloc.
+
+## Where the time goes
+
+`sample` on `xmalloc --threads=8` (3 s at 1 ms, stacks from all threads), which is the weakest workload
+because every free is remote:
+
+| Top of stack | Samples | What it is |
+|---|---:|---|
+| `__psynch_cvwait`, `__ulock_wait`, `__psynch_cvsignal` | 10909 | the benchmark's own batch handoff between producer and consumer |
+| `ts_page_alloc_slow` | 6969 | taking the remote-free list and walking it to count the blocks |
+| `free_slow` + `ts_heap_free_remote` | 1719 | the remote free itself, a CAS push |
+| `ts_malloc` | 932 | the fast path |
+| `_tlv_get_addr` | 194 | the macOS thread-local lookup on the way to the heap |
+
+- The bench spends more time waiting on its own condition variable than in the allocator.
+- `ts_page_alloc_slow` is the real cost. Each block on a remote-free list was last written by another
+  core, so walking the list takes a cache miss per block. Those blocks are about to be handed out anyway,
+  so the misses move rather than disappear. Having freers keep a count wouldn't remove them, and it would
+  add a second contended word to the push.
+- `_tlv_get_addr` is small here but it is on every malloc. The override work replaces it with a direct
+  thread-specific slot.
+
+Nothing in the profile justified another change to the fast paths, so this step only records the results.
+
+On Linux the equivalent is `perf record -g ./build-rel/bench/xmalloc --alloc=ts --threads=8` followed by
+`perf report --no-children`; Linux numbers will come from CI.
