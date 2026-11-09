@@ -1,6 +1,7 @@
 #include "segment.h"
 
 #include "os.h"
+#include "stats.h"
 
 /* Only touched on the slow paths that map and unmap segments. */
 static _Atomic size_t live_segments;
@@ -11,6 +12,7 @@ ts_segment_t *ts_segment_alloc(void) {
         return NULL;
     /* mmap memory is zeroed, so only the non-zero fields need setting. */
     atomic_fetch_add_explicit(&live_segments, 1, memory_order_relaxed);
+    TS_STAT_INC(TS_STAT_SEGMENT_MAP);
     seg->kind = TS_KIND_SEGMENT;
     for (size_t i = 0; i < TS_PAGES_PER_SEGMENT; i++) {
         seg->pages[i].index = (uint8_t)i;
@@ -22,6 +24,7 @@ ts_segment_t *ts_segment_alloc(void) {
 void ts_segment_free(ts_segment_t *seg) {
     ts_os_free(seg, TS_SEGMENT_SIZE);
     atomic_fetch_sub_explicit(&live_segments, 1, memory_order_relaxed);
+    TS_STAT_INC(TS_STAT_SEGMENT_UNMAP);
 }
 
 size_t ts_segment_count(void) {

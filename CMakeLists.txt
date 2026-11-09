@@ -12,6 +12,7 @@ endif()
 
 option(TS_BUILD_TESTS "Build unit + stress tests" ON)
 option(TS_BUILD_BENCH "Build benchmarks" ON)
+option(TS_STATS "Collect allocator counters (slows every malloc and free)" OFF)
 set(TS_SANITIZER "none" CACHE STRING "Sanitizer: none|address|thread|undefined")
 set_property(CACHE TS_SANITIZER PROPERTY STRINGS none address thread undefined)
 
@@ -27,18 +28,30 @@ if(NOT TS_SANITIZER STREQUAL "none")
   add_link_options(-fsanitize=${TS_SANITIZER})
 endif()
 
-add_library(tsmalloc STATIC
+set(TS_SOURCES
   src/tsmalloc.c
   src/os.c
   src/size_class.c
   src/segment.c
   src/page.c
   src/heap.c
-  src/huge.c)
-target_include_directories(tsmalloc
-  PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(tsmalloc PUBLIC Threads::Threads)
+  src/huge.c
+  src/stats.c)
+# Absolute, because test/ builds a second copy of the library from its own directory.
+list(TRANSFORM TS_SOURCES PREPEND ${PROJECT_SOURCE_DIR}/)
+
+function(ts_add_library name)
+  add_library(${name} STATIC ${TS_SOURCES})
+  target_include_directories(${name}
+    PUBLIC  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(${name} PUBLIC Threads::Threads)
+endfunction()
+
+ts_add_library(tsmalloc)
+if(TS_STATS)
+  target_compile_definitions(tsmalloc PUBLIC TS_STATS=1)
+endif()
 
 if(TS_BUILD_TESTS)
   enable_testing()

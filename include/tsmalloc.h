@@ -2,6 +2,7 @@
 #define TSMALLOC_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,10 @@ int    ts_posix_memalign(void **out, size_t alignment, size_t size);
 /* Number of bytes actually usable at p (>= the size that was requested).
  * Returns 0 for NULL. */
 size_t ts_usable_size(const void *p);
+
+/* Write allocator counters to `out`. They are only collected in a build
+ * configured with -DTS_STATS=ON; otherwise this prints a note saying so. */
+void ts_stats_print(FILE *out);
 
 #ifdef __cplusplus
 }

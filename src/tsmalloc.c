@@ -22,6 +22,7 @@
 #include "huge.h"
 #include "internal.h"
 #include "os.h"
+#include "stats.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -119,6 +120,7 @@ static TS_NOINLINE void bad_pointer(void) {
 }
 
 void *ts_malloc(size_t size) {
+    TS_STAT_INC(TS_STAT_MALLOC);
     if (ts_likely(size <= TS_MEDIUM_MAX))
         return small_alloc(size);
     return ts_huge_alloc(size, TS_ALIGN);
@@ -150,6 +152,7 @@ static TS_NOINLINE void free_slow(void *region, void *p) {
 void ts_free(void *p) {
     if (ts_unlikely(p == NULL))
         return;
+    TS_STAT_INC(TS_STAT_FREE);
     ts_segment_t *seg = region_of(p);
     if (ts_likely(seg->kind == TS_KIND_SEGMENT &&
                   atomic_load_explicit(&seg->thread_id, memory_order_relaxed) == ts_thread_id())) {
@@ -185,6 +188,7 @@ void *ts_calloc(size_t count, size_t size) {
         errno = ENOMEM;
         return NULL;
     }
+    TS_STAT_INC(TS_STAT_MALLOC);
     if (total > TS_MEDIUM_MAX)
         return ts_huge_alloc_zeroed(total, TS_ALIGN);
     void *p = small_alloc(total);
@@ -236,6 +240,7 @@ void *ts_realloc(void *p, size_t size) {
 static void *aligned_alloc_checked(size_t alignment, size_t size) {
     if (alignment <= TS_ALIGN)
         return ts_malloc(size);
+    TS_STAT_INC(TS_STAT_MALLOC);
     if (alignment <= TS_PAGE0_OFFSET) {
         unsigned cls = ts_size_to_class_aligned(size, alignment);
         if (cls < TS_NUM_CLASSES)

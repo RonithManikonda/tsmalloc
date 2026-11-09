@@ -2,6 +2,7 @@
 
 #include "os.h"
 #include "segment.h"
+#include "stats.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -159,8 +160,10 @@ static void cache_put(void *base, size_t mapped) {
     cache_trim_hot();
     pthread_mutex_unlock(&cache_lock);
 
-    for (size_t i = 0; i < nvictims; i++)
+    for (size_t i = 0; i < nvictims; i++) {
         ts_os_free(victims[i].base, victims[i].mapped);
+        TS_STAT_INC(TS_STAT_HUGE_UNMAP);
+    }
 }
 
 static void *finish_block(char *base, size_t lead, size_t mapped) {
@@ -191,14 +194,17 @@ static void *huge_map(size_t size, size_t align, int may_recycle) {
     if (may_recycle && align <= TS_SEGMENT_SIZE) {
         size_t cached;
         void *base = cache_get(mapped, &cached);
-        if (base != NULL)
+        if (base != NULL) {
+            TS_STAT_INC(TS_STAT_HUGE_CACHE_HIT);
             return finish_block(base, lead, cached);
+        }
     }
 
     size_t map_align = align > TS_SEGMENT_SIZE ? align : TS_SEGMENT_SIZE;
     char *base = ts_os_alloc_aligned(total, map_align);
     if (base == NULL)
         return NULL;
+    TS_STAT_INC(TS_STAT_HUGE_MAP);
     return finish_block(base, lead, mapped);
 }
 
@@ -217,6 +223,7 @@ void ts_huge_free(ts_huge_t *h, void *p) {
 
     if (lead > TS_SEGMENT_SIZE || !cacheable(mapped)) {
         ts_os_free(base, mapped);
+        TS_STAT_INC(TS_STAT_HUGE_UNMAP);
         return;
     }
     cache_put(base, mapped);
@@ -250,5 +257,6 @@ void ts_huge_cache_flush(void) {
         if (b == NULL)
             return;
         ts_os_free(e.base, e.mapped);
+        TS_STAT_INC(TS_STAT_HUGE_UNMAP);
     }
 }

@@ -12,6 +12,15 @@ ts_add_test(test_internal)
 ts_add_test(test_size_class)
 ts_add_test(test_large)
 ts_add_test(test_huge)
+ts_add_test(test_stats)
+# The same test against a copy of the library with the counters compiled in,
+# so both modes are checked whatever TS_STATS is set to here.
+ts_add_library(tsmalloc_stats)
+target_compile_definitions(tsmalloc_stats PUBLIC TS_STATS=1)
+add_executable(test_stats_on test_stats.c)
+target_link_libraries(test_stats_on PRIVATE tsmalloc_stats)
+target_include_directories(test_stats_on PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_stats_on COMMAND test_stats_on)
 ts_add_test(test_purge)
 # Same binary with a delay in the environment, to check the variable is read.
 add_test(NAME test_purge_env COMMAND test_purge)

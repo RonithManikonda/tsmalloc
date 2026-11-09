@@ -1,5 +1,7 @@
 #include "heap.h"
 
+#include "stats.h"
+
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
@@ -154,10 +156,12 @@ static ts_page_t *page_fresh(ts_heap_t *heap, unsigned cls) {
     }
     page->size_class = (uint8_t)cls;
     ts_page_init(page, ts_class_size(cls));
+    TS_STAT_INC(TS_STAT_PAGE_ALLOC);
     return page;
 }
 
 static void page_retire(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
+    TS_STAT_INC(TS_STAT_PAGE_RETIRE);
     ts_segment_page_free(seg, page);
     if (seg->used_pages == 0) {
         segment_unlink(heap, seg);
@@ -182,10 +186,13 @@ static void heap_purge(ts_heap_t *heap) {
     }
 
     int all = heap->purge_delay == 0;
+    size_t purged = 0;
     for (ts_segment_t *seg = heap->segments; seg != NULL; seg = seg->next)
-        heap->purged_pages += ts_segment_purge(seg, all);
+        purged += ts_segment_purge(seg, all);
     for (ts_segment_t *seg = heap->seg_cache; seg != NULL; seg = seg->next)
-        heap->purged_pages += ts_segment_purge(seg, all);
+        purged += ts_segment_purge(seg, all);
+    heap->purged_pages += purged;
+    TS_STAT_ADD(TS_STAT_PAGE_PURGE, purged);
 }
 
 void ts_heap_tick(ts_heap_t *heap) {
@@ -273,6 +280,7 @@ void ts_heap_page_freed(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
 }
 
 void ts_heap_free_remote(ts_segment_t *seg, void *p) {
+    TS_STAT_INC(TS_STAT_REMOTE_FREE);
     ts_block_t *b = p;
     _Atomic uintptr_t *tf = ts_ptr_thread_free(seg, p);
     uintptr_t old = atomic_load_explicit(tf, memory_order_relaxed);
