@@ -23,6 +23,16 @@ target_include_directories(test_stats_on PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_stats_on COMMAND test_stats_on)
 ts_add_test(test_registry)
 ts_add_test(test_purge)
+
+# A program using plain malloc, run with tsmalloc injected.
+if(TARGET tsmalloc_override)
+  add_executable(override_smoke override_smoke.c)
+  target_link_libraries(override_smoke PRIVATE Threads::Threads)
+  add_dependencies(override_smoke tsmalloc_override)
+  add_test(NAME override_smoke COMMAND override_smoke)
+  set_tests_properties(override_smoke PROPERTIES
+    ENVIRONMENT DYLD_INSERT_LIBRARIES=$<TARGET_FILE:tsmalloc_override>)
+endif()
 # Same binary with a delay in the environment, to check the variable is read.
 add_test(NAME test_purge_env COMMAND test_purge)
 set_tests_properties(test_purge_env PROPERTIES ENVIRONMENT TSMALLOC_PURGE_DELAY=7)

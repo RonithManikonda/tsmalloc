@@ -54,6 +54,17 @@ if(TS_STATS)
   target_compile_definitions(tsmalloc PUBLIC TS_STATS=1)
 endif()
 
+# libtsmalloc.dylib: DYLD_INSERT_LIBRARIES it into a program to replace malloc.
+# Not with sanitizers, whose runtimes replace malloc themselves.
+if(APPLE AND TS_SANITIZER STREQUAL "none")
+  add_library(tsmalloc_override SHARED ${TS_SOURCES} src/override_macos.c)
+  set_target_properties(tsmalloc_override PROPERTIES OUTPUT_NAME tsmalloc)
+  target_include_directories(tsmalloc_override
+    PUBLIC  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(tsmalloc_override PUBLIC Threads::Threads)
+endif()
+
 if(TS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)

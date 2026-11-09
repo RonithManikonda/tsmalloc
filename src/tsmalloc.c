@@ -35,26 +35,63 @@
  * once tsmalloc is malloc.
  *
  * The heap is also stored under a pthread key, whose destructor abandons it
- * when the thread exits (see ts_heap_abandon). The key only exists for the
- * destructor; lookups go through tl_heap. */
-static _Thread_local ts_heap_t *tl_heap;
-
+ * when the thread exits (see ts_heap_abandon). */
 static pthread_key_t heap_key;
 static pthread_once_t heap_key_once = PTHREAD_ONCE_INIT;
 static int heap_key_ok;
+
+#if defined(__APPLE__) && defined(__aarch64__)
+/* dyld can malloc the first time a thread touches a _Thread_local, which is
+ * a recursion once we are malloc. So on macOS the heap lives only in the
+ * key's slot, and is read straight out of the thread's TSD array the same
+ * way pthread_getspecific would: slot number = key, array as in ts_thread_id.
+ * Dynamic keys start at 256, so 0 can mean "no key yet". */
+static _Atomic size_t heap_slot;
+
+TS_INLINE ts_heap_t *heap_current(void) {
+    size_t slot = atomic_load_explicit(&heap_slot, memory_order_relaxed);
+    if (ts_unlikely(slot == 0))
+        return NULL;
+    uintptr_t tsd;
+    __asm__("mrs %0, tpidrro_el0" : "=r"(tsd));
+    return ((ts_heap_t *const *)(tsd & ~(uintptr_t)7))[slot];
+}
+
+TS_INLINE void heap_set_current(ts_heap_t *heap) {
+    (void)heap; /* pthread_setspecific in heap_create is the only store */
+}
+
+static void heap_key_published(void) {
+    atomic_store_explicit(&heap_slot, (size_t)heap_key, memory_order_relaxed);
+}
+#else
+static _Thread_local ts_heap_t *tl_heap;
+
+TS_INLINE ts_heap_t *heap_current(void) {
+    return tl_heap;
+}
+
+TS_INLINE void heap_set_current(ts_heap_t *heap) {
+    tl_heap = heap;
+}
+
+static void heap_key_published(void) {}
+#endif
 
 static void heap_thread_exit(void *arg) {
     ts_heap_t *heap = arg;
     /* Other destructors may still run after us and malloc or free. Their
      * mallocs get a fresh heap (and a fresh key value, so we're called
      * again); their frees of our blocks see owner 0 and go remote. */
-    tl_heap = NULL;
+    heap_set_current(NULL);
     ts_heap_abandon(heap);
     ts_os_free(heap, sizeof *heap);
 }
 
 static void heap_key_create(void) {
     heap_key_ok = pthread_key_create(&heap_key, heap_thread_exit) == 0;
+    if (heap_key_ok)
+        heap_key_published();
 }
 
 static TS_NOINLINE ts_heap_t *heap_create(void) {
@@ -63,7 +100,7 @@ static TS_NOINLINE ts_heap_t *heap_create(void) {
         return NULL; /* errno is ENOMEM */
     ts_heap_init(heap);
     heap->thread_id = ts_thread_id();
-    tl_heap = heap;
+    heap_set_current(heap);
     /* If the key can't be set the heap just outlives its thread, as all
      * heaps used to: a leak, not a crash. */
     pthread_once(&heap_key_once, heap_key_create);
@@ -73,7 +110,7 @@ static TS_NOINLINE ts_heap_t *heap_create(void) {
 }
 
 static TS_NOINLINE void *small_alloc_class(unsigned cls) {
-    ts_heap_t *heap = tl_heap;
+    ts_heap_t *heap = heap_current();
     if (ts_unlikely(heap == NULL)) {
         heap = heap_create();
         if (heap == NULL)
@@ -88,7 +125,7 @@ static TS_NOINLINE void *small_alloc_class(unsigned cls) {
  * page, bigger sizes) goes through small_alloc_class, which never inlines
  * so this stays small. */
 TS_INLINE void *small_alloc(size_t size) {
-    ts_heap_t *heap = tl_heap;
+    ts_heap_t *heap = heap_current();
     if (ts_likely(heap != NULL && size <= TS_LUT_MAX)) {
         ts_page_t *page = heap->pages_direct[(size + 15) >> 4];
         ts_block_t *b = page->free;
@@ -140,8 +177,8 @@ static TS_NOINLINE void free_slow(void *region, void *p) {
 }
 
 /* Local or remote is decided by the thread id stored in the segment rather
- * than by comparing heaps: the id is one register read away, while tl_heap
- * may cost a call into the TLS machinery (it does on macOS). A thread that
+ * than by comparing heaps: the id is one register read away, and finding
+ * the heap can take a call into the TLS machinery on some platforms. A thread that
  * never allocated owns no segment, so its frees all take the remote path,
  * as they should. Relaxed is enough: only this thread ever stores its own
  * id into a segment, so the comparison can't succeed spuriously.
