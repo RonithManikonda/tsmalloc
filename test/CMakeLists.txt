@@ -32,6 +32,15 @@ if(TARGET tsmalloc_override)
   add_test(NAME override_smoke COMMAND override_smoke)
   set_tests_properties(override_smoke PROPERTIES
     ENVIRONMENT DYLD_INSERT_LIBRARIES=$<TARGET_FILE:tsmalloc_override>)
+
+  # A real program with threads. It has to be outside SIP's reach:
+  # the system's /usr/bin/python3 would silently run without tsmalloc.
+  find_program(TS_BREW_PYTHON python3 PATHS /opt/homebrew/bin /usr/local/bin NO_DEFAULT_PATH)
+  if(TS_BREW_PYTHON)
+    add_test(NAME override_python COMMAND ${TS_BREW_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/override_smoke.py)
+    set_tests_properties(override_python PROPERTIES
+      ENVIRONMENT DYLD_INSERT_LIBRARIES=$<TARGET_FILE:tsmalloc_override>)
+  endif()
 endif()
 # Same binary with a delay in the environment, to check the variable is read.
 add_test(NAME test_purge_env COMMAND test_purge)

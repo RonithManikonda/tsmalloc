@@ -21,6 +21,14 @@ static int failures;
         }                                                                \
     } while (0)
 
+#define REQUIRE_ZONE(z)                       \
+    do {                                      \
+        if ((z) == NULL) {                    \
+            fprintf(stderr, "no zone\n");     \
+            return 1;                         \
+        }                                     \
+    } while (0)
+
 /* Called through these so the compiler can't remove pairs of calls. */
 static void *(*volatile do_malloc)(size_t) = malloc;
 
@@ -74,10 +82,35 @@ int main(void) {
     EXPECT(copy != NULL && is_ours(copy));
     free(copy);
 
-    /* Straight from the system's zone, so it isn't ours, and the interposed
-     * functions have to hand it back rather than read a header from it. */
-    char *foreign = malloc_zone_malloc(malloc_default_zone(), 200);
+    /* tsmalloc is the default zone, so the zone API lands on it as well. */
+    malloc_zone_t *zone = malloc_default_zone();
+    char *via_zone = malloc_zone_malloc(zone, 300);
+    EXPECT(via_zone != NULL && is_ours(via_zone));
+    EXPECT(malloc_zone_from_ptr(via_zone) != NULL);
+    via_zone = malloc_zone_realloc(zone, via_zone, 70000);
+    EXPECT(via_zone != NULL && is_ours(via_zone));
+    malloc_zone_free(zone, via_zone);
+
+    void *via_memalign = malloc_zone_memalign(zone, 256, 300);
+    EXPECT(via_memalign != NULL && is_ours(via_memalign) && ((size_t)via_memalign & 255) == 0);
+    free(via_memalign);
+
+    void *batch[16];
+    unsigned got = malloc_zone_batch_malloc(zone, 64, batch, 16);
+    EXPECT(got == 16);
+    for (unsigned i = 0; i < got; i++)
+        EXPECT(is_ours(batch[i]));
+    malloc_zone_batch_free(zone, batch, got);
+
+    EXPECT(malloc_good_size(100) >= 100);
+
+    /* From a private zone, so it isn't ours, and the interposed functions
+     * have to hand it back rather than read a header from it. */
+    malloc_zone_t *private_zone = malloc_create_zone(0, 0);
+    REQUIRE_ZONE(private_zone);
+    char *foreign = malloc_zone_malloc(private_zone, 200);
     EXPECT(foreign != NULL && !is_ours(foreign));
+    EXPECT(malloc_zone_from_ptr(foreign) == private_zone);
     EXPECT(malloc_size(foreign) >= 200);
     strcpy(foreign, "still here");
     foreign = realloc(foreign, 100000);
