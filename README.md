@@ -48,5 +48,11 @@ ctest --test-dir build --output-on-failure
 Sanitizer builds: `-DTS_SANITIZER=address|thread|undefined` (use a separate build directory each,
 e.g. `build-asan/`).
 
+`-DTS_DEBUG=ON` turns on checks in every free, realloc and `ts_usable_size`: double frees, pointers
+tsmalloc never handed out (or into the middle of a block), and writes past the end of a block (each
+block keeps an 8-byte canary after its usable size) abort with a message. Freed blocks are filled
+with `0xDF`. It applies to the override libraries too, so a whole program can run with it. Tests
+for it (`test_debug`) are always built, against their own copy of the library.
+
 CI (`.github/workflows/ci.yml`) runs all of these on Ubuntu with gcc and clang and on macOS, plus a
 Release build that also runs the `LD_PRELOAD` smoke test and a quick benchmark sweep.

@@ -22,6 +22,7 @@
 #include "huge.h"
 #include "internal.h"
 #include "os.h"
+#include "registry.h"
 #include "stats.h"
 
 #include <errno.h>
@@ -203,11 +204,149 @@ static TS_NOINLINE void bad_pointer(void) {
     fatal("tsmalloc: free/realloc of a pointer not from tsmalloc\n");
 }
 
+/* Bytes the block at p really has: its size class, or the rest of its
+ * mapping. ts_usable_size is this minus the debug tail. */
+static size_t block_bytes(const void *p) {
+    void *region = region_of(p);
+    uint32_t kind = region_kind(region);
+    if (kind == TS_KIND_SEGMENT)
+        return ts_ptr_page(region, p)->block_size;
+    if (kind != TS_KIND_LARGE)
+        bad_pointer();
+    return ts_huge_usable(region);
+}
+
+/* ---- TS_DEBUG ------------------------------------------------------------
+ *
+ * Built with TS_DEBUG, every block keeps its last TS_DEBUG_TAIL bytes for a
+ * canary: the block's address xor one constant while it is allocated, xor
+ * another once it is freed. Requests grow by that much, so the canary sits
+ * right past what ts_usable_size reports and a write beyond it lands there.
+ *
+ * free (and realloc, and ts_usable_size) first check that the pointer is
+ * ours at all (the registry), then that it is the start of a block in a
+ * page in use, then the canary. A freed canary means a double free; any
+ * other value means something wrote past the block. Freed heap blocks are
+ * filled with 0xDF so that use after free reads obvious garbage.
+ *
+ * What it can't see: a stale pointer freed after its block was handed out
+ * again looks like a normal free, and two threads freeing the same block at
+ * the same moment race on the canary. Huge blocks get the checks but not
+ * the fill, since most of them are unmapped right away. */
+#ifndef TS_DEBUG
+#define TS_DEBUG 0
+#endif
+
+#if TS_DEBUG
+#define TS_DEBUG_TAIL sizeof(uintptr_t)
+#define TS_DEBUG_FILL 0xDF
+#define TS_CANARY_LIVE  ((uintptr_t)0x5afeb10c4a11c0deull)
+#define TS_CANARY_FREED ((uintptr_t)0xdeadf4eed0bb1e00ull)
+
+static TS_NOINLINE void debug_fatal(const char *what, const void *p) {
+    char buf[128];
+    size_t n = 0;
+    const char *prefix = "tsmalloc: ";
+    while (*prefix)
+        buf[n++] = *prefix++;
+    while (*what && n < sizeof buf - 24)
+        buf[n++] = *what++;
+    buf[n++] = ' ';
+    buf[n++] = '0';
+    buf[n++] = 'x';
+    uintptr_t v = (uintptr_t)p;
+    for (int shift = (int)sizeof v * 8 - 4; shift >= 0; shift -= 4)
+        buf[n++] = "0123456789abcdef"[(v >> shift) & 15];
+    buf[n++] = '\n';
+    buf[n] = '\0';
+    fatal(buf);
+}
+
+TS_INLINE uintptr_t *debug_canary_at(void *p, size_t bytes) {
+    return (uintptr_t *)((char *)p + bytes - TS_DEBUG_TAIL);
+}
+
+/* Is p the start of a block that free could have handed out? Doesn't look
+ * at the block itself. Returns its size in bytes. */
+static size_t debug_validate(const void *p) {
+    if ((uintptr_t)p % TS_ALIGN != 0 || !ts_is_ours(p))
+        debug_fatal("pointer was not allocated by tsmalloc:", p);
+    void *region = region_of(p);
+    /* ts_is_ours already pinned a huge block to its one valid address. */
+    if (region_kind(region) == TS_KIND_LARGE)
+        return ts_huge_usable(region);
+    ts_segment_t *seg = region;
+    ts_page_t *page = ts_ptr_page(seg, p);
+    if (page->in_use != TS_PAGE_USED)
+        debug_fatal("pointer to memory not in use (double free?):", p);
+    size_t offset = (size_t)((const uint8_t *)p - ts_page_start(seg, page));
+    if ((const uint8_t *)p < ts_page_start(seg, page) || offset % page->block_size != 0)
+        debug_fatal("pointer into the middle of a block:", p);
+    /* reserved moves as the owner carves out blocks, so only the owner may
+     * read it; other threads skip this check. */
+    if (atomic_load_explicit(&seg->thread_id, memory_order_relaxed) == ts_thread_id() &&
+        offset / page->block_size >= page->reserved)
+        debug_fatal("pointer to a block never allocated:", p);
+    return page->block_size;
+}
+
+/* Validate p and its canary; returns the block's size in bytes. */
+static size_t debug_check_live(void *p) {
+    size_t bytes = debug_validate(p);
+    uintptr_t canary = *debug_canary_at(p, bytes);
+    if (canary == ((uintptr_t)p ^ TS_CANARY_FREED))
+        debug_fatal("double free of", p);
+    if (canary != ((uintptr_t)p ^ TS_CANARY_LIVE))
+        debug_fatal("write past the end of block", p);
+    return bytes;
+}
+
+TS_INLINE size_t debug_size(size_t size) {
+    return size > SIZE_MAX - TS_DEBUG_TAIL ? SIZE_MAX : size + TS_DEBUG_TAIL;
+}
+
+/* Every pointer on its way out of an allocation call goes through here. */
+static void *debug_alloc(void *p) {
+    if (p != NULL)
+        *debug_canary_at(p, block_bytes(p)) = (uintptr_t)p ^ TS_CANARY_LIVE;
+    return p;
+}
+
+/* On the way into free, before the block goes back on any list (which
+ * writes its first word). */
+static void debug_free(void *p) {
+    size_t bytes = debug_check_live(p);
+    if (region_kind(region_of(p)) == TS_KIND_SEGMENT)
+        memset(p, TS_DEBUG_FILL, bytes - TS_DEBUG_TAIL);
+    *debug_canary_at(p, bytes) = (uintptr_t)p ^ TS_CANARY_FREED;
+}
+#else
+#define TS_DEBUG_TAIL ((size_t)0)
+
+TS_INLINE size_t debug_size(size_t size) {
+    return size;
+}
+
+TS_INLINE void *debug_alloc(void *p) {
+    return p;
+}
+
+TS_INLINE void debug_free(void *p) {
+    (void)p;
+}
+
+TS_INLINE size_t debug_check_live(void *p) {
+    (void)p;
+    return 0;
+}
+#endif
+
 void *ts_malloc(size_t size) {
     TS_STAT_INC(TS_STAT_MALLOC);
+    size = debug_size(size);
     if (ts_likely(size <= TS_MEDIUM_MAX))
-        return small_alloc(size);
-    return ts_huge_alloc(size, TS_ALIGN);
+        return debug_alloc(small_alloc(size));
+    return debug_alloc(ts_huge_alloc(size, TS_ALIGN));
 }
 
 /* Everything ts_free doesn't finish inline: remote small frees, local ones
@@ -237,6 +376,8 @@ void ts_free(void *p) {
     if (ts_unlikely(p == NULL))
         return;
     TS_STAT_INC(TS_STAT_FREE);
+    if (TS_DEBUG)
+        debug_free(p);
     ts_segment_t *seg = region_of(p);
     if (ts_likely(seg->kind == TS_KIND_SEGMENT &&
                   atomic_load_explicit(&seg->thread_id, memory_order_relaxed) == ts_thread_id())) {
@@ -257,13 +398,9 @@ void ts_free(void *p) {
 size_t ts_usable_size(const void *p) {
     if (p == NULL)
         return 0;
-    void *region = region_of(p);
-    uint32_t kind = region_kind(region);
-    if (kind == TS_KIND_SEGMENT)
-        return ts_ptr_page(region, p)->block_size;
-    if (kind != TS_KIND_LARGE)
-        bad_pointer();
-    return ts_huge_usable(region);
+    if (TS_DEBUG)
+        debug_check_live((void *)p);
+    return block_bytes(p) - TS_DEBUG_TAIL;
 }
 
 void *ts_calloc(size_t count, size_t size) {
@@ -273,14 +410,15 @@ void *ts_calloc(size_t count, size_t size) {
         return NULL;
     }
     TS_STAT_INC(TS_STAT_MALLOC);
-    if (total > TS_MEDIUM_MAX)
-        return ts_huge_alloc_zeroed(total, TS_ALIGN);
-    void *p = small_alloc(total);
+    size_t n = debug_size(total);
+    if (n > TS_MEDIUM_MAX)
+        return debug_alloc(ts_huge_alloc_zeroed(n, TS_ALIGN));
+    void *p = small_alloc(n);
     /* Heap blocks are recycled, and even never-used ones have a free-list
      * link written into their first word, so they always need clearing. */
     if (p != NULL)
         memset(p, 0, total);
-    return p;
+    return debug_alloc(p);
 }
 
 static void *move_block(void *p, size_t old, size_t size) {
@@ -295,16 +433,21 @@ static void *move_block(void *p, size_t old, size_t size) {
 void *ts_realloc(void *p, size_t size) {
     if (p == NULL)
         return ts_malloc(size);
+    if (TS_DEBUG)
+        debug_check_live(p);
     void *region = region_of(p);
     uint32_t kind = region_kind(region);
 
+    /* `old` is what the caller may use; the block keeps its debug tail
+     * whether it stays or moves, so sizes are compared without it. */
     if (ts_likely(kind == TS_KIND_SEGMENT)) {
         ts_page_t *page = ts_ptr_page(region, p);
-        size_t old = page->block_size;
+        size_t old = page->block_size - TS_DEBUG_TAIL;
         /* Same block when the size stays in its class, or still fits with
          * at least half of the block in use (saves a copy for modest
          * shrinks). A big shrink moves so the rest isn't stranded. */
-        if (size <= old && (size >= old / 2 || ts_size_to_class(size) == page->size_class))
+        if (size <= old &&
+            (size >= old / 2 || ts_size_to_class(debug_size(size)) == page->size_class))
             return p;
         return move_block(p, old, size);
     }
@@ -312,10 +455,10 @@ void *ts_realloc(void *p, size_t size) {
         bad_pointer();
 
     ts_huge_t *h = region;
-    size_t old = ts_huge_usable(h);
-    if (size <= old && size > TS_MEDIUM_MAX) {
-        ts_huge_shrink(h, p, size);
-        return p;
+    size_t old = ts_huge_usable(h) - TS_DEBUG_TAIL;
+    if (size <= old && debug_size(size) > TS_MEDIUM_MAX) {
+        ts_huge_shrink(h, p, debug_size(size));
+        return debug_alloc(p); /* the end moved, and the canary with it */
     }
     return move_block(p, old, size);
 }
@@ -325,14 +468,15 @@ static void *aligned_alloc_checked(size_t alignment, size_t size) {
     if (alignment <= TS_ALIGN)
         return ts_malloc(size);
     TS_STAT_INC(TS_STAT_MALLOC);
+    size = debug_size(size);
     if (alignment <= TS_PAGE0_OFFSET) {
         unsigned cls = ts_size_to_class_aligned(size, alignment);
         if (cls < TS_NUM_CLASSES)
-            return small_alloc_class(cls);
+            return debug_alloc(small_alloc_class(cls));
     }
     /* Bigger alignments, or sizes past the heap classes: a mapping of its
      * own, over-allocated by the alignment so the block can slide up. */
-    return ts_huge_alloc(size, alignment);
+    return debug_alloc(ts_huge_alloc(size, alignment));
 }
 
 int ts_posix_memalign(void **out, size_t alignment, size_t size) {

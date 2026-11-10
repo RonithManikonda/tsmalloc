@@ -21,6 +21,13 @@ add_executable(test_stats_on test_stats.c)
 target_link_libraries(test_stats_on PRIVATE tsmalloc_stats)
 target_include_directories(test_stats_on PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_stats_on COMMAND test_stats_on)
+# TS_DEBUG's checks, against a copy of the library built with them.
+ts_add_library(tsmalloc_debug)
+target_compile_definitions(tsmalloc_debug PUBLIC TS_DEBUG=1)
+add_executable(test_debug test_debug.c)
+target_link_libraries(test_debug PRIVATE tsmalloc_debug)
+target_include_directories(test_debug PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_debug COMMAND test_debug)
 ts_add_test(test_registry)
 ts_add_test(test_purge)
 
@@ -81,3 +88,17 @@ set_tests_properties(test_stress PROPERTIES LABELS stress)
 # The harshest purge setting: every page is decommitted the moment it is free.
 add_test(NAME test_stress_purge COMMAND test_stress)
 set_tests_properties(test_stress_purge PROPERTIES LABELS stress ENVIRONMENT TSMALLOC_PURGE_DELAY=0)
+
+# With TS_DEBUG on for the whole build, every block is 8 bytes bigger than its
+# request. These tests check exact block sizes or same-block reuse, or free
+# blocks taken from a heap directly (which have no canary), so they don't
+# apply; test_debug is what covers that build. override_python stops on
+# purpose: Apple's libffi writes 16 bytes into malloc(8) in ffi_closure_alloc,
+# which libmalloc's 16-byte minimum hides.
+if(TS_DEBUG)
+  set(TS_LAYOUT_TESTS test_large test_heap test_realloc test_align test_tlheap)
+  if(TEST override_python)
+    list(APPEND TS_LAYOUT_TESTS override_python)
+  endif()
+  set_tests_properties(${TS_LAYOUT_TESTS} PROPERTIES DISABLED TRUE)
+endif()

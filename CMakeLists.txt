@@ -13,6 +13,7 @@ endif()
 option(TS_BUILD_TESTS "Build unit + stress tests" ON)
 option(TS_BUILD_BENCH "Build benchmarks" ON)
 option(TS_STATS "Collect allocator counters (slows every malloc and free)" OFF)
+option(TS_DEBUG "Check every free for double frees, bad pointers and overruns" OFF)
 set(TS_SANITIZER "none" CACHE STRING "Sanitizer: none|address|thread|undefined")
 set_property(CACHE TS_SANITIZER PROPERTY STRINGS none address thread undefined)
 
@@ -48,6 +49,12 @@ function(ts_add_library name)
     PRIVATE ${PROJECT_SOURCE_DIR}/src)
   target_link_libraries(${name} PUBLIC Threads::Threads)
 endfunction()
+
+# Applies to the override libraries as well, so a whole program can be
+# run with the checks on.
+if(TS_DEBUG)
+  add_compile_definitions(TS_DEBUG=1)
+endif()
 
 ts_add_library(tsmalloc)
 if(TS_STATS)
