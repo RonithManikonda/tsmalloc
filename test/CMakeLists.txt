@@ -56,6 +56,14 @@ if(TARGET tsmalloc_override_static)
   add_test(NAME override_static COMMAND override_static)
 endif()
 
+# Real programs under LD_PRELOAD: ls, git, a gcc and g++ compile, python3.
+if(TARGET tsmalloc_override AND NOT APPLE)
+  find_program(TS_BASH bash)
+  add_test(NAME preload_smoke
+           COMMAND ${TS_BASH} ${PROJECT_SOURCE_DIR}/scripts/preload_smoke.sh $<TARGET_FILE:tsmalloc_override>)
+  set_tests_properties(preload_smoke PROPERTIES LABELS smoke TIMEOUT 300)
+endif()
+
 # Same binary with a delay in the environment, to check the variable is read.
 add_test(NAME test_purge_env COMMAND test_purge)
 set_tests_properties(test_purge_env PROPERTIES ENVIRONMENT TSMALLOC_PURGE_DELAY=7)
