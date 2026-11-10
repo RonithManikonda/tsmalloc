@@ -82,6 +82,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TS_SANITIZER STREQUAL "none")
   endforeach()
 endif()
 
+if(APPLE)
+  set(TS_PRELOAD_VAR DYLD_INSERT_LIBRARIES)
+else()
+  set(TS_PRELOAD_VAR LD_PRELOAD)
+endif()
+
 if(TS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)

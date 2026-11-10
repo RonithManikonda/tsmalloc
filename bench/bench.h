@@ -14,13 +14,22 @@
  *
  * The allocator is picked at run time through function pointers, so both
  * sides pay the same indirect call and the same binary measures both.
+ *
+ * With BENCH_PLAIN defined (the *_plain programs) tsmalloc isn't linked at
+ * all and only libc's names are called, as in any ordinary program. Whether
+ * they reach tsmalloc is then up to LD_PRELOAD / DYLD_INSERT_LIBRARIES, and
+ * the report says which it was.
  */
 #ifndef TS_BENCH_H
 #define TS_BENCH_H
 
 /* Users are compiled with _POSIX_C_SOURCE=200809L (bench/CMakeLists.txt)
  * so clock_gettime is visible under -std=c11 on glibc. */
+#ifdef BENCH_PLAIN
+#include <dlfcn.h>
+#else
 #include "tsmalloc.h"
+#endif
 
 #include <pthread.h>
 #include <stdio.h>
@@ -36,7 +45,9 @@ typedef struct {
 } bench_alloc_t;
 
 static const bench_alloc_t bench_system = {"system", malloc, free, realloc};
+#ifndef BENCH_PLAIN
 static const bench_alloc_t bench_ts = {"ts", ts_malloc, ts_free, ts_realloc};
+#endif
 
 typedef struct {
     const char *bench;
@@ -68,14 +79,20 @@ static inline long bench_positive(const char *bench, const char *v) {
 
 /* Parses the common flags; `default_iters` applies when --iters is absent. */
 static inline bench_opts_t bench_parse(int argc, char **argv, const char *bench, long default_iters) {
+#ifdef BENCH_PLAIN
+    bench_opts_t o = {bench, &bench_system, 1, default_iters};
+#else
     bench_opts_t o = {bench, &bench_ts, 1, default_iters};
+#endif
     for (int i = 1; i < argc; i++) {
         const char *v;
         if ((v = bench_flag(argv[i], "alloc")) != NULL) {
             if (strcmp(v, "system") == 0)
                 o.alloc = &bench_system;
+#ifndef BENCH_PLAIN
             else if (strcmp(v, "ts") == 0)
                 o.alloc = &bench_ts;
+#endif
             else
                 bench_usage(bench);
         } else if ((v = bench_flag(argv[i], "threads")) != NULL) {
@@ -153,9 +170,18 @@ static inline double bench_run(int threads, void *(*fn)(void *), void *args, siz
     return secs;
 }
 
+/* The allocator behind the calls, as the report should name it. */
+static inline const char *bench_alloc_name(const bench_opts_t *o) {
+#ifdef BENCH_PLAIN
+    if (dlsym(RTLD_DEFAULT, "ts_is_ours") != NULL)
+        return "ts";
+#endif
+    return o->alloc->name;
+}
+
 static inline void bench_report(const bench_opts_t *o, double ops, double secs) {
     printf("bench=%s alloc=%s threads=%d ops=%.0f secs=%.3f mops=%.2f\n",
-           o->bench, o->alloc->name, o->threads, ops, secs,
+           o->bench, bench_alloc_name(o), o->threads, ops, secs,
            secs > 0 ? ops / secs / 1e6 : 0.0);
 }
 

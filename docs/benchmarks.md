@@ -215,3 +215,86 @@ Nothing in the profile justified another change to the fast paths, so this step 
 
 On Linux the equivalent is `perf record -g ./build-rel/bench/xmalloc --alloc=ts --threads=8` followed by
 `perf report --no-children`; Linux numbers will come from CI.
+
+## Through the override: unmodified programs (step 39)
+
+This is the comparison the project exists for. `scripts/bench_override.sh` runs the `*_plain` programs, which
+contain no tsmalloc and only call `malloc` and `free`. They run once as built and once with tsmalloc injected
+(`DYLD_INSERT_LIBRARIES` on macOS, `LD_PRELOAD` on Linux). Each run reports the allocator it actually got, and
+the script stops if that is not the one it asked for. 3 runs per cell, median shown, as above.
+
+### macOS 26.3.1, libmalloc (Apple M4 Pro, 14 cores)
+
+| bench | threads | system Mops/s | ts Mops/s | ts / system |
+|---|---:|---:|---:|---:|
+| cache_scratch | 1 | 4763.04 | 4979.92 | 1.05x |
+| cache_scratch | 2 | 3314.83 | 9523.81 | 2.87x |
+| cache_scratch | 4 | 3934.10 | 17515.05 | 4.45x |
+| cache_scratch | 8 | 8725.53 | 34436.37 | 3.95x |
+| cache_scratch | 14 | 18325.51 | 49160.54 | 2.68x |
+| larson | 1 | 30.21 | 93.21 | 3.09x |
+| larson | 2 | 24.35 | 172.53 | 7.09x |
+| larson | 4 | 24.27 | 299.85 | 12.35x |
+| larson | 8 | 33.91 | 400.16 | 11.80x |
+| larson | 14 | 39.62 | 417.46 | 10.54x |
+| threadtest-1024 | 1 | 54.74 | 245.22 | 4.48x |
+| threadtest-1024 | 2 | 22.22 | 474.38 | 21.35x |
+| threadtest-1024 | 4 | 45.00 | 844.24 | 18.76x |
+| threadtest-1024 | 8 | 36.66 | 1624.04 | 44.30x |
+| threadtest-1024 | 14 | 19.16 | 1707.73 | 89.13x |
+| threadtest-16 | 1 | 83.14 | 279.02 | 3.36x |
+| threadtest-16 | 2 | 160.10 | 535.33 | 3.34x |
+| threadtest-16 | 4 | 88.92 | 962.46 | 10.82x |
+| threadtest-16 | 8 | 200.59 | 1839.08 | 9.17x |
+| threadtest-16 | 14 | 256.56 | 2047.38 | 7.98x |
+| threadtest-256 | 1 | 75.93 | 273.82 | 3.61x |
+| threadtest-256 | 2 | 27.80 | 535.62 | 19.27x |
+| threadtest-256 | 4 | 85.28 | 963.86 | 11.30x |
+| threadtest-256 | 8 | 93.73 | 1849.28 | 19.73x |
+| threadtest-256 | 14 | 101.48 | 2005.16 | 19.76x |
+| threadtest-64 | 1 | 77.58 | 275.33 | 3.55x |
+| threadtest-64 | 2 | 151.68 | 536.77 | 3.54x |
+| threadtest-64 | 4 | 196.29 | 967.59 | 4.93x |
+| threadtest-64 | 8 | 143.17 | 1863.93 | 13.02x |
+| threadtest-64 | 14 | 235.97 | 2025.46 | 8.58x |
+| xmalloc | 2 | 23.77 | 35.98 | 1.51x |
+| xmalloc | 4 | 22.08 | 53.08 | 2.40x |
+| xmalloc | 8 | 33.09 | 80.67 | 2.44x |
+| xmalloc | 14 | 37.29 | 124.69 | 3.34x |
+
+### Linux, glibc 2.39 (Ubuntu 24.04 arm64)
+
+Run in a Docker container on the same Mac (14 virtual CPUs), so treat these as indicative until there are
+numbers from native Linux hardware. glibc gives each thread its own cache and arena, so the gap is much smaller
+than against libmalloc: about 1.3x to 2.5x when threads keep to their own blocks. The largest gap is `xmalloc`
+(4x to 5x), where every free comes from another thread. `cache_scratch` is level at 1 and 2 threads.
+
+| bench | threads | system Mops/s | ts Mops/s | ts / system |
+|---|---:|---:|---:|---:|
+| cache_scratch | 1 | 3839.47 | 3839.06 | 1.00x |
+| cache_scratch | 2 | 7457.23 | 7478.90 | 1.00x |
+| cache_scratch | 4 | 4609.25 | 13357.30 | 2.90x |
+| cache_scratch | 8 | 4536.80 | 26119.63 | 5.76x |
+| larson | 1 | 59.71 | 76.94 | 1.29x |
+| larson | 2 | 102.61 | 138.14 | 1.35x |
+| larson | 4 | 140.36 | 186.04 | 1.33x |
+| larson | 8 | 202.28 | 274.44 | 1.36x |
+| threadtest-1024 | 1 | 75.29 | 147.34 | 1.96x |
+| threadtest-1024 | 2 | 145.63 | 284.56 | 1.95x |
+| threadtest-1024 | 4 | 267.90 | 521.65 | 1.95x |
+| threadtest-1024 | 8 | 522.42 | 1000.32 | 1.91x |
+| threadtest-16 | 1 | 118.91 | 185.56 | 1.56x |
+| threadtest-16 | 2 | 237.39 | 352.17 | 1.48x |
+| threadtest-16 | 4 | 427.21 | 634.11 | 1.48x |
+| threadtest-16 | 8 | 822.97 | 1202.00 | 1.46x |
+| threadtest-256 | 1 | 70.57 | 176.00 | 2.49x |
+| threadtest-256 | 2 | 137.70 | 333.05 | 2.42x |
+| threadtest-256 | 4 | 252.79 | 606.68 | 2.40x |
+| threadtest-256 | 8 | 488.07 | 1156.71 | 2.37x |
+| threadtest-64 | 1 | 117.61 | 182.54 | 1.55x |
+| threadtest-64 | 2 | 235.01 | 352.96 | 1.50x |
+| threadtest-64 | 4 | 426.19 | 621.08 | 1.46x |
+| threadtest-64 | 8 | 821.74 | 1176.21 | 1.43x |
+| xmalloc | 2 | 12.36 | 55.57 | 4.50x |
+| xmalloc | 4 | 23.12 | 99.70 | 4.31x |
+| xmalloc | 8 | 20.44 | 105.15 | 5.14x |

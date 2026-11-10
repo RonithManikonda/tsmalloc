@@ -8,6 +8,10 @@
 #
 # Builds into build-rel/ (Release) first. --quick divides the work per thread
 # by 10, for a sanity check rather than numbers worth publishing.
+#
+# --override compares the *_plain programs instead, which only call libc's
+# malloc and free: once as they are and once with tsmalloc injected. Each run
+# has to report the allocator it was meant to use, or the script stops.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,13 +21,15 @@ ncpu="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
 threads="1 2 4 8 $ncpu"
 reps=3
 scale=1
+override=0
 
 for arg in "$@"; do
     case "$arg" in
         --threads=*) threads="${arg#*=}" ;;
         --reps=*)    reps="${arg#*=}" ;;
         --quick)     scale=10 ;;
-        *) echo "usage: $0 [--threads=\"1 2 4\"] [--reps=N] [--quick]" >&2; exit 2 ;;
+        --override)  override=1 ;;
+        *) echo "usage: $0 [--threads=\"1 2 4\"] [--reps=N] [--quick] [--override]" >&2; exit 2 ;;
     esac
 done
 
@@ -43,6 +49,34 @@ benches=(
     "cache_scratch $((20000 / scale))"
 )
 
+if [ "$(uname)" = Darwin ]; then
+    preload_var=DYLD_INSERT_LIBRARIES
+    preload_lib="$build/libtsmalloc.dylib"
+else
+    preload_var=LD_PRELOAD
+    preload_lib="$build/libtsmalloc.so"
+fi
+
+# One run, printing the program's result lines.
+run_bench() {
+    local bench="$1" alloc="$2" t="$3" iters="$4" out
+    if [ "$override" -eq 0 ]; then
+        "$build/bench/$bench" --alloc="$alloc" --threads="$t" --iters="$iters"
+        return
+    fi
+    if [ "$alloc" = ts ]; then
+        out="$(env "$preload_var=$preload_lib" "$build/bench/${bench}_plain" --threads="$t" --iters="$iters")"
+    else
+        out="$("$build/bench/${bench}_plain" --threads="$t" --iters="$iters")"
+    fi
+    if ! grep -q "alloc=$alloc " <<<"$out"; then
+        echo "bench.sh: $bench did not run on $alloc:" >&2
+        echo "$out" >&2
+        exit 1
+    fi
+    echo "$out"
+}
+
 # bench -> "name threads alloc mops" lines, one per printed result.
 results="$(mktemp)"
 trap 'rm -f "$results"' EXIT
@@ -52,7 +86,7 @@ for entry in "${benches[@]}"; do
     for t in $threads; do
         for alloc in system ts; do
             for ((r = 0; r < reps; r++)); do
-                "$build/bench/$bench" --alloc="$alloc" --threads="$t" --iters="$iters" |
+                run_bench "$bench" "$alloc" "$t" "$iters" |
                     sed -E 's/.*bench=([^ ]+) alloc=([^ ]+) threads=([0-9]+).* mops=([0-9.]+).*/\1 \3 \2 \4/' \
                     >>"$results"
             done
