@@ -65,7 +65,9 @@ static void heap_key_published(void) {
     atomic_store_explicit(&heap_slot, (size_t)heap_key, memory_order_relaxed);
 }
 #else
-static _Thread_local ts_heap_t *tl_heap;
+/* initial-exec: the default model in a shared library goes through
+ * __tls_get_addr, which can malloc, and that is us. It's also one load less. */
+__attribute__((tls_model("initial-exec"))) static _Thread_local ts_heap_t *tl_heap;
 
 TS_INLINE ts_heap_t *heap_current(void) {
     return tl_heap;

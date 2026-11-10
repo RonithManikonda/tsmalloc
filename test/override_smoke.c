@@ -3,8 +3,21 @@
  * injected. It finds ts_is_ours at run time, so it fails if the override
  * didn't take effect instead of passing against the system malloc.
  */
+#ifdef __linux__
+#define _GNU_SOURCE /* RTLD_DEFAULT, reallocarray, memalign, ... */
+#endif
+
 #include <dlfcn.h>
+#include <errno.h>
+#ifdef __APPLE__
 #include <malloc/malloc.h>
+#else
+#include <malloc.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#define malloc_size malloc_usable_size
+#endif
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +34,7 @@ static int failures;
         }                                                                \
     } while (0)
 
+#ifdef __APPLE__
 #define REQUIRE_ZONE(z)                       \
     do {                                      \
         if ((z) == NULL) {                    \
@@ -29,8 +43,20 @@ static int failures;
         }                                     \
     } while (0)
 
+#endif
+
 /* Called through these so the compiler can't remove pairs of calls. */
 static void *(*volatile do_malloc)(size_t) = malloc;
+#ifdef __linux__
+static void (*volatile do_free)(void *) = free;
+static void *(*volatile do_calloc)(size_t, size_t) = calloc;
+static void *(*volatile do_realloc)(void *, size_t) = realloc;
+static void *(*volatile do_reallocarray)(void *, size_t, size_t) = reallocarray;
+static void *(*volatile do_memalign)(size_t, size_t) = memalign;
+static void *(*volatile do_pvalloc)(size_t) = pvalloc;
+static void *(*volatile do_aligned_alloc)(size_t, size_t) = aligned_alloc;
+static int (*volatile do_posix_memalign)(void **, size_t, size_t) = posix_memalign;
+#endif
 
 static void *worker(void *arg) {
     void **handoff = arg;
@@ -47,7 +73,7 @@ static void *worker(void *arg) {
 }
 
 int main(void) {
-    is_ours = (int (*)(const void *))dlsym(RTLD_DEFAULT, "ts_is_ours");
+    is_ours = __extension__(int (*)(const void *))dlsym(RTLD_DEFAULT, "ts_is_ours");
     if (is_ours == NULL) {
         fprintf(stderr, "tsmalloc is not loaded\n");
         return 1;
@@ -82,6 +108,7 @@ int main(void) {
     EXPECT(copy != NULL && is_ours(copy));
     free(copy);
 
+#ifdef __APPLE__
     /* tsmalloc is the default zone, so the zone API lands on it as well. */
     malloc_zone_t *zone = malloc_default_zone();
     char *via_zone = malloc_zone_malloc(zone, 300);
@@ -116,6 +143,72 @@ int main(void) {
     foreign = realloc(foreign, 100000);
     EXPECT(foreign != NULL && strcmp(foreign, "still here") == 0);
     free(foreign);
+#else
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+
+    void *m = do_memalign(256, 300);
+    EXPECT(m != NULL && is_ours(m) && ((size_t)m & 255) == 0);
+    do_free(m);
+    /* Not a power of two: rounded up to 128. */
+    m = do_memalign(100, 300);
+    EXPECT(m != NULL && is_ours(m) && ((size_t)m & 127) == 0);
+    do_free(m);
+    m = do_memalign(1, 50);
+    EXPECT(m != NULL && is_ours(m));
+    do_free(m);
+    errno = 0;
+    EXPECT(do_memalign(SIZE_MAX, 16) == NULL && errno == EINVAL);
+
+    char *pv = do_pvalloc(page + 1);
+    EXPECT(pv != NULL && is_ours(pv) && ((size_t)pv & (page - 1)) == 0);
+    EXPECT(malloc_usable_size(pv) >= 2 * page);
+    pv[2 * page - 1] = 1;
+    do_free(pv);
+    pv = do_pvalloc(0);
+    EXPECT(pv != NULL && malloc_usable_size(pv) >= page);
+    do_free(pv);
+    errno = 0;
+    EXPECT(do_pvalloc(SIZE_MAX - 1) == NULL && errno == ENOMEM);
+
+    void *al = do_aligned_alloc(64, 100);
+    EXPECT(al != NULL && is_ours(al) && ((size_t)al & 63) == 0);
+    do_free(al);
+    errno = 0;
+    EXPECT(do_aligned_alloc(3, 100) == NULL && errno == EINVAL);
+    void *untouched = &failures;
+    EXPECT(do_posix_memalign(&untouched, 3, 100) == EINVAL && untouched == &failures);
+
+    char *arr = do_reallocarray(NULL, 10, 100);
+    EXPECT(arr != NULL && is_ours(arr));
+    arr[999] = 7;
+    arr = do_reallocarray(arr, 20, 100);
+    EXPECT(arr != NULL && is_ours(arr) && arr[999] == 7);
+    errno = 0;
+    EXPECT(do_reallocarray(arr, SIZE_MAX, 2) == NULL && errno == ENOMEM);
+    do_free(arr); /* the failed call left it alone */
+
+    /* glibc's behaviour, which differs from ts_realloc's. */
+    void *gone = do_malloc(40);
+    EXPECT(do_realloc(gone, 0) == NULL);
+    void *from_null = do_realloc(NULL, 0);
+    EXPECT(from_null != NULL && is_ours(from_null));
+    do_free(from_null);
+
+    errno = 0;
+    EXPECT(do_calloc(SIZE_MAX, 2) == NULL && errno == ENOMEM);
+    EXPECT(malloc_usable_size(NULL) == 0);
+
+    /* Not ours: has to be left alone rather than read as a block. */
+    char *foreign = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    EXPECT(foreign != MAP_FAILED && !is_ours(foreign));
+    strcpy(foreign, "still here");
+    do_free(foreign);
+    EXPECT(malloc_usable_size(foreign) == 0);
+    errno = 0;
+    EXPECT(do_realloc(foreign, 100) == NULL && errno == ENOMEM);
+    EXPECT(strcmp(foreign, "still here") == 0);
+    munmap(foreign, page);
+#endif
     free(NULL);
 
     pthread_t t[8];

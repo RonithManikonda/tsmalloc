@@ -65,6 +65,23 @@ if(APPLE AND TS_SANITIZER STREQUAL "none")
   target_link_libraries(tsmalloc_override PUBLIC Threads::Threads)
 endif()
 
+# libtsmalloc.so for LD_PRELOAD, and libtsmalloc_override.a to link malloc in.
+# -fno-builtin so the compiler can't turn the body of malloc or calloc into a
+# call to itself.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TS_SANITIZER STREQUAL "none")
+  set_source_files_properties(src/override_linux.c PROPERTIES COMPILE_OPTIONS -fno-builtin)
+  add_library(tsmalloc_override SHARED ${TS_SOURCES} src/override_linux.c)
+  set_target_properties(tsmalloc_override PROPERTIES OUTPUT_NAME tsmalloc)
+  add_library(tsmalloc_override_static STATIC ${TS_SOURCES} src/override_linux.c)
+  set_target_properties(tsmalloc_override_static PROPERTIES OUTPUT_NAME tsmalloc_override)
+  foreach(lib tsmalloc_override tsmalloc_override_static)
+    target_include_directories(${lib}
+      PUBLIC  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+      PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_link_libraries(${lib} PUBLIC Threads::Threads)
+  endforeach()
+endif()
+
 if(TS_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)

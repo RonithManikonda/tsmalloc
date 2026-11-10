@@ -26,22 +26,36 @@ ts_add_test(test_purge)
 
 # A program using plain malloc, run with tsmalloc injected.
 if(TARGET tsmalloc_override)
+  if(APPLE)
+    set(TS_PRELOAD_VAR DYLD_INSERT_LIBRARIES)
+  else()
+    set(TS_PRELOAD_VAR LD_PRELOAD)
+  endif()
   add_executable(override_smoke override_smoke.c)
-  target_link_libraries(override_smoke PRIVATE Threads::Threads)
+  target_link_libraries(override_smoke PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
   add_dependencies(override_smoke tsmalloc_override)
   add_test(NAME override_smoke COMMAND override_smoke)
   set_tests_properties(override_smoke PROPERTIES
-    ENVIRONMENT DYLD_INSERT_LIBRARIES=$<TARGET_FILE:tsmalloc_override>)
+    ENVIRONMENT ${TS_PRELOAD_VAR}=$<TARGET_FILE:tsmalloc_override>)
 
   # A real program with threads. It has to be outside SIP's reach:
   # the system's /usr/bin/python3 would silently run without tsmalloc.
   find_program(TS_BREW_PYTHON python3 PATHS /opt/homebrew/bin /usr/local/bin NO_DEFAULT_PATH)
-  if(TS_BREW_PYTHON)
+  if(APPLE AND TS_BREW_PYTHON)
     add_test(NAME override_python COMMAND ${TS_BREW_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/override_smoke.py)
     set_tests_properties(override_python PROPERTIES
       ENVIRONMENT DYLD_INSERT_LIBRARIES=$<TARGET_FILE:tsmalloc_override>)
   endif()
 endif()
+# The same program with malloc linked in rather than injected. Its symbols are
+# exported so the dlsym of ts_is_ours finds them in the executable.
+if(TARGET tsmalloc_override_static)
+  add_executable(override_static override_smoke.c)
+  target_link_libraries(override_static PRIVATE tsmalloc_override_static ${CMAKE_DL_LIBS})
+  set_target_properties(override_static PROPERTIES ENABLE_EXPORTS ON)
+  add_test(NAME override_static COMMAND override_static)
+endif()
+
 # Same binary with a delay in the environment, to check the variable is read.
 add_test(NAME test_purge_env COMMAND test_purge)
 set_tests_properties(test_purge_env PROPERTIES ENVIRONMENT TSMALLOC_PURGE_DELAY=7)
