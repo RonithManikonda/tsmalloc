@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.cc }} / ${{ matrix.config }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cc: [gcc, clang]
+        config: [debug, asan, ubsan, tsan, release]
+        exclude:
+          # gcc on the macOS runners is Apple clang under another name.
+          - os: macos-latest
+            cc: gcc
+    env:
+      CC: ${{ matrix.cc }}
+      # Recoverable UBSan checks only print by default; make them fail the test.
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu 24.04 runners use 32 bits of mmap randomization, more than
+      # the TSan runtime's fixed shadow layout can cope with.
+      - name: Lower ASLR entropy for TSan
+        if: runner.os == 'Linux' && matrix.config == 'tsan'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Configure
+        run: |
+          case "${{ matrix.config }}" in
+            debug)   args="-DCMAKE_BUILD_TYPE=Debug" ;;
+            asan)    args="-DCMAKE_BUILD_TYPE=Debug -DTS_SANITIZER=address" ;;
+            ubsan)   args="-DCMAKE_BUILD_TYPE=Debug -DTS_SANITIZER=undefined" ;;
+            tsan)    args="-DCMAKE_BUILD_TYPE=Debug -DTS_SANITIZER=thread" ;;
+            # build-rel is where scripts/bench.sh looks, so it reuses this build.
+            release) args="-DCMAKE_BUILD_TYPE=Release" ;;
+          esac
+          dir=build
+          [ "${{ matrix.config }}" = release ] && dir=build-rel
+          echo "BUILD_DIR=$dir" >> "$GITHUB_ENV"
+          cmake -S . -B "$dir" $args
+
+      - name: Build
+        run: cmake --build "$BUILD_DIR" -j 4
+
+      # On Linux this includes preload_smoke (ls, git, gcc, g++, python3
+      # under LD_PRELOAD) in the debug and release jobs.
+      - name: Test
+        run: ctest --test-dir "$BUILD_DIR" --output-on-failure --timeout 600
+
+      - name: Benchmark smoke
+        if: matrix.config == 'release'
+        run: |
+          scripts/bench.sh --quick --threads="1 2 4" --reps=1
+          scripts/bench.sh --override --quick --threads="1 4" --reps=1

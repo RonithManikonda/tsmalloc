@@ -31,6 +31,21 @@
 #define TS_UNDER_TSAN 0
 #endif
 
+/* Linux ASan's allocator doesn't take its own locks around fork (checked
+ * with gcc 13's libasan): a child thread can block forever on a size-class
+ * lock some parent thread held at that moment. The hang is inside the
+ * sanitizer runtime, not tsmalloc, so the child skips its thread there. */
+#if defined(__linux__) && defined(__SANITIZE_ADDRESS__)
+#define TS_UNDER_LINUX_ASAN 1
+#elif defined(__linux__) && defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define TS_UNDER_LINUX_ASAN 1
+#endif
+#endif
+#ifndef TS_UNDER_LINUX_ASAN
+#define TS_UNDER_LINUX_ASAN 0
+#endif
+
 enum {
     SLOTS = 4096,
     WORKERS = 4,
@@ -135,7 +150,8 @@ static void child_body(void) {
     for (int i = 0; i < N; i++)
         ts_free(blocks[i]);
 
-#if !TS_UNDER_TSAN /* TSan refuses to start threads after a multithreaded fork */
+/* TSan refuses to start threads after a multithreaded fork; see above for ASan. */
+#if !TS_UNDER_TSAN && !TS_UNDER_LINUX_ASAN
     pthread_t t;
     if (pthread_create(&t, NULL, child_thread, NULL) != 0)
         _exit(5);

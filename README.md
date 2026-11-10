@@ -1,5 +1,7 @@
 # tsmalloc
 
+[![ci](https://github.com/RonithManikonda/tsmalloc/actions/workflows/ci.yml/badge.svg)](https://github.com/RonithManikonda/tsmalloc/actions/workflows/ci.yml)
+
 A thread-safe `malloc` replacement written in C11. The goal is to beat the system allocator on
 multithreaded (`-pthread`) programs: macOS libmalloc on my machine, glibc's ptmalloc on Linux.
 
@@ -45,3 +47,6 @@ ctest --test-dir build --output-on-failure
 
 Sanitizer builds: `-DTS_SANITIZER=address|thread|undefined` (use a separate build directory each,
 e.g. `build-asan/`).
+
+CI (`.github/workflows/ci.yml`) runs all of these on Ubuntu with gcc and clang and on macOS, plus a
+Release build that also runs the `LD_PRELOAD` smoke test and a quick benchmark sweep.

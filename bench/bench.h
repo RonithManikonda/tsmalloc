@@ -148,6 +148,12 @@ static inline void *bench_trampoline(void *p) {
  * all released at once. Returns seconds from release until the last one
  * finished. */
 static inline double bench_run(int threads, void *(*fn)(void *), void *args, size_t stride) {
+    /* Option parsing already rejects this; the check also tells gcc the
+     * calloc counts below can't come from a negative int. */
+    if (threads < 1) {
+        fprintf(stderr, "bench_run: need at least one thread\n");
+        exit(2);
+    }
     bench_gate_t gate = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, threads, 0};
     pthread_t *th = calloc((size_t)threads, sizeof *th);
     bench_thread_t *slots = calloc((size_t)threads, sizeof *slots);
