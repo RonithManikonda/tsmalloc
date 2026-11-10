@@ -122,6 +122,13 @@ TS_INLINE uintptr_t ts_thread_id(void) {
 }
 #endif
 
+/* What has to happen around fork (tsmalloc.c). pthread_atfork calls these,
+ * unless ts_fork_via_zone says the macOS malloc zone is doing it instead. */
+void ts_fork_prepare(void);
+void ts_fork_parent(void);
+void ts_fork_child(void);
+extern int ts_fork_via_zone;
+
 /* ---- Core types (defined as each part is written) -------------------------- */
 typedef struct ts_block_s   ts_block_t;
 typedef struct ts_page_s    ts_page_t;

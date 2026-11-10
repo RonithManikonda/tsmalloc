@@ -1,3 +1,7 @@
+#if defined(__linux__)
+#define _GNU_SOURCE /* pthread_rwlock_t under -std=c11 */
+#endif
+
 #include "heap.h"
 
 #include "stats.h"
@@ -279,6 +283,14 @@ void ts_heap_page_freed(ts_heap_t *heap, ts_segment_t *seg, ts_page_t *page) {
         queue_push_front(heap, page->size_class, page);
 }
 
+/* A freer that dies between setting TS_TF_BUSY and clearing it would leave
+ * the flag set for good, and every later free into that page would wait on
+ * it. Threads do die like that, as far as the child of a fork can tell. So the
+ * BUSY window is held as a reader of this lock and the fork handlers take it
+ * as a writer, which means no such window is open when fork happens. Only
+ * the first remote free into a full page pays for it. */
+static pthread_rwlock_t busy_gate = PTHREAD_RWLOCK_INITIALIZER;
+
 void ts_heap_free_remote(ts_segment_t *seg, void *p) {
     TS_STAT_INC(TS_STAT_REMOTE_FREE);
     ts_block_t *b = p;
@@ -298,9 +310,11 @@ void ts_heap_free_remote(ts_segment_t *seg, void *p) {
              * once, and pushes after us go to the page as normal. Acquire
              * pairs with the release in ts_page_mark_full: seg->heap is
              * the heap that flagged the page. */
-            if (atomic_compare_exchange_weak_explicit(tf, &old, TS_TF_BUSY,
-                                                      memory_order_acquire, memory_order_relaxed))
+            pthread_rwlock_rdlock(&busy_gate);
+            if (atomic_compare_exchange_strong_explicit(tf, &old, TS_TF_BUSY,
+                                                        memory_order_acquire, memory_order_relaxed))
                 break;
+            pthread_rwlock_unlock(&busy_gate);
             continue;
         }
         b->next = (ts_block_t *)old;
@@ -322,6 +336,7 @@ void ts_heap_free_remote(ts_segment_t *seg, void *p) {
                                                     memory_order_release, memory_order_relaxed));
     /* Release: whoever sees BUSY clear also sees the push above. */
     atomic_fetch_and_explicit(tf, ~TS_TF_BUSY, memory_order_release);
+    pthread_rwlock_unlock(&busy_gate);
 }
 
 /* Wait until no remote freer is between flagging `page` BUSY and clearing
@@ -484,4 +499,27 @@ void ts_abandoned_visit(void (*fn)(ts_segment_t *seg, void *arg), void *arg) {
     for (ts_segment_t *seg = abandoned; seg != NULL; seg = seg->next)
         fn(seg, arg);
     pthread_mutex_unlock(&abandoned_lock);
+}
+
+/* ---- fork ---------------------------------------------------------------- */
+
+/* The registry and the page lists are lock-free, so these two locks are all
+ * there is to hold still. Other threads' heaps survive in the child as plain
+ * memory: blocks in them can be freed but are never reused. */
+void ts_heap_fork_prepare(void) {
+    pthread_rwlock_wrlock(&busy_gate);
+    pthread_mutex_lock(&abandoned_lock);
+}
+
+void ts_heap_fork_parent(void) {
+    pthread_mutex_unlock(&abandoned_lock);
+    pthread_rwlock_unlock(&busy_gate);
+}
+
+/* Overwritten with a fresh lock rather than unlocked or re-initialized: on
+ * macOS these have kernel state tied to the parent, and pthread_rwlock_init
+ * on a held lock leaves it held. Nobody else exists yet to be using them. */
+void ts_heap_fork_child(void) {
+    abandoned_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    busy_gate = (pthread_rwlock_t)PTHREAD_RWLOCK_INITIALIZER;
 }

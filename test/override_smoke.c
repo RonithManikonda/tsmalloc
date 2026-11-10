@@ -19,6 +19,8 @@
 #define malloc_size malloc_usable_size
 #endif
 #include <pthread.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -220,6 +222,24 @@ int main(void) {
         EXPECT(is_ours(handoff[i]));
         free(handoff[i]);
     }
+
+    /* A child of a multithreaded process, with the override still in place. */
+    char *inherited = do_malloc(4096);
+    memset(inherited, 7, 4096);
+    pid_t pid = fork();
+    EXPECT(pid >= 0);
+    if (pid == 0) {
+        alarm(30);
+        int ok = inherited[4095] == 7 && is_ours(inherited);
+        free(inherited);
+        char *fresh = do_malloc(1 << 20);
+        ok = ok && fresh != NULL && is_ours(fresh);
+        free(fresh);
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    EXPECT(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    free(inherited);
 
     /* stdio buffers, which libc allocates for itself. */
     printf("override_smoke: %d failures\n", failures);

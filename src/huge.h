@@ -55,4 +55,9 @@ TS_INLINE size_t ts_huge_usable(const ts_huge_t *h) {
 void ts_huge_cache_info(size_t *count, size_t *bytes, size_t *hot_bytes);
 void ts_huge_cache_flush(void);
 
+/* pthread_atfork handlers for the cache lock. */
+void ts_huge_fork_prepare(void);
+void ts_huge_fork_parent(void);
+void ts_huge_fork_child(void);
+
 #endif /* TS_HUGE_H */

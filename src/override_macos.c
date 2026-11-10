@@ -214,14 +214,25 @@ static void intro_log(malloc_zone_t *zone, void *address) {
     (void)address;
 }
 
-/* libmalloc calls these around fork for every zone, so they have to exist.
- * Taking the allocator's locks across fork comes with the fork-safety work. */
+/* libmalloc calls these around fork for every zone: force_lock before it,
+ * force_unlock in the parent, reinit_lock in the child. They are used instead
+ * of pthread_atfork because of when they run. In the child, system libraries
+ * call malloc before any pthread_atfork handler has had its turn, and with
+ * our locks still held that never returns; reinit_lock comes first. */
 static void intro_force_lock(malloc_zone_t *zone) {
     (void)zone;
+    ts_fork_prepare();
 }
 
 static void intro_force_unlock(malloc_zone_t *zone) {
     (void)zone;
+    ts_fork_parent();
+}
+
+/* libmalloc doesn't check this one for NULL. */
+static void intro_reinit_lock(malloc_zone_t *zone) {
+    (void)zone;
+    ts_fork_child();
 }
 
 static void intro_statistics(malloc_zone_t *zone, malloc_statistics_t *stats) {
@@ -244,6 +255,7 @@ static malloc_introspection_t zone_introspection = {
     .force_unlock = intro_force_unlock,
     .statistics  = intro_statistics,
     .zone_locked = intro_zone_locked,
+    .reinit_lock = intro_reinit_lock,
 };
 
 static malloc_zone_t ts_zone = {
@@ -285,6 +297,7 @@ __attribute__((constructor)) static void zone_install(void) {
      * default out so ours lands first, then add the old default back so its
      * existing blocks can still be found and freed. */
     malloc_zone_register(&ts_zone);
+    ts_fork_via_zone = 1;
     malloc_zone_unregister(system_zone);
     malloc_zone_register(system_zone);
     /* Keep the purgeable zone behind the system one, where it started. */

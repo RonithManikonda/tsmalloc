@@ -111,6 +111,51 @@ static TS_NOINLINE ts_heap_t *heap_create(void) {
     return heap;
 }
 
+/* ---- fork ---------------------------------------------------------------- */
+
+int ts_fork_via_zone;
+
+void ts_fork_prepare(void) {
+    ts_heap_fork_prepare();
+    ts_huge_fork_prepare();
+}
+
+void ts_fork_parent(void) {
+    ts_huge_fork_parent();
+    ts_heap_fork_parent();
+}
+
+void ts_fork_child(void) {
+    ts_huge_fork_child();
+    ts_heap_fork_child();
+}
+
+static void atfork_prepare(void) {
+    if (!ts_fork_via_zone)
+        ts_fork_prepare();
+}
+
+static void atfork_parent(void) {
+    if (!ts_fork_via_zone)
+        ts_fork_parent();
+}
+
+static void atfork_child(void) {
+    if (!ts_fork_via_zone)
+        ts_fork_child();
+}
+
+/* From a constructor, not the first malloc: pthread_atfork can itself malloc,
+ * and inside heap_create that would recurse into pthread_once. Creating the
+ * key here also means no fork can land halfway through that pthread_once.
+ *
+ * Handlers of programs registered later run before ours in prepare and after
+ * ours in the child, so they can use malloc from either. */
+__attribute__((constructor)) static void fork_handlers_install(void) {
+    pthread_once(&heap_key_once, heap_key_create);
+    (void)pthread_atfork(atfork_prepare, atfork_parent, atfork_child);
+}
+
 static TS_NOINLINE void *small_alloc_class(unsigned cls) {
     ts_heap_t *heap = heap_current();
     if (ts_unlikely(heap == NULL)) {

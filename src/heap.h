@@ -129,6 +129,11 @@ void ts_heap_abandon(ts_heap_t *heap);
  * heaps without an owning thread never adopt. */
 int ts_heap_adopt(ts_heap_t *heap);
 
+/* pthread_atfork handlers for the state in heap.c. */
+void ts_heap_fork_prepare(void);
+void ts_heap_fork_parent(void);
+void ts_heap_fork_child(void);
+
 /* TSMALLOC_PURGE_DELAY's value, read once: a tick count, 0 to purge as soon
  * as a page is free, negative to never purge. Heaps take it when set up. */
 long ts_purge_delay(void);

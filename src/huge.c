@@ -266,3 +266,15 @@ void ts_huge_cache_flush(void) {
         TS_STAT_INC(TS_STAT_HUGE_UNMAP);
     }
 }
+
+void ts_huge_fork_prepare(void) {
+    pthread_mutex_lock(&cache_lock);
+}
+
+void ts_huge_fork_parent(void) {
+    pthread_mutex_unlock(&cache_lock);
+}
+
+void ts_huge_fork_child(void) {
+    cache_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER; /* see ts_heap_fork_child */
+}
