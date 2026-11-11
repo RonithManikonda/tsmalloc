@@ -298,3 +298,19 @@ than against libmalloc: about 1.3x to 2.5x when threads keep to their own blocks
 | xmalloc | 2 | 12.36 | 55.57 | 4.50x |
 | xmalloc | 4 | 23.12 | 99.70 | 4.31x |
 | xmalloc | 8 | 20.44 | 105.15 | 5.14x |
+
+## Against jemalloc and mimalloc (step 44)
+
+`scripts/bench.sh --others` runs the same `*_plain` programs as `--override`, with jemalloc and mimalloc
+injected too, if their shared libraries are already installed (Homebrew, Debian/Ubuntu multiarch paths, or
+`/usr/local/lib`). It never installs anything. `TS_JEMALLOC=<path>` and `TS_MIMALLOC=<path>` point it at a
+library somewhere else. The table gets one Mops/s column per allocator and a `ts / <name>` ratio for each.
+
+Each run has to say which allocator served it, as with `--override`: a plain program looks for a symbol only
+that allocator exports (`mi_version` for mimalloc, `mallctl` or `je_mallctl` for jemalloc), and the script
+stops if the name doesn't match. Without that check a library that failed to load would quietly be measured
+as the system allocator.
+
+Neither library is installed on the development Mac or in the CI images, so there are no numbers here yet.
+mimalloc is the allocator tsmalloc's design follows, so it is the comparison that would say most about what
+the simplifications cost.

@@ -17,8 +17,8 @@
  *
  * With BENCH_PLAIN defined (the *_plain programs) tsmalloc isn't linked at
  * all and only libc's names are called, as in any ordinary program. Whether
- * they reach tsmalloc is then up to LD_PRELOAD / DYLD_INSERT_LIBRARIES, and
- * the report says which it was.
+ * they reach tsmalloc (or jemalloc / mimalloc) is then up to LD_PRELOAD /
+ * DYLD_INSERT_LIBRARIES, and the report says which it was.
  */
 #ifndef TS_BENCH_H
 #define TS_BENCH_H
@@ -176,11 +176,19 @@ static inline double bench_run(int threads, void *(*fn)(void *), void *args, siz
     return secs;
 }
 
-/* The allocator behind the calls, as the report should name it. */
+/* The allocator behind the calls, as the report should name it. A plain
+ * program can't ask malloc who it is, so it looks for a symbol only that
+ * allocator exports. jemalloc may be built with a je_ prefix (the default
+ * on macOS), so both spellings count. */
 static inline const char *bench_alloc_name(const bench_opts_t *o) {
 #ifdef BENCH_PLAIN
     if (dlsym(RTLD_DEFAULT, "ts_is_ours") != NULL)
         return "ts";
+    if (dlsym(RTLD_DEFAULT, "mi_version") != NULL)
+        return "mimalloc";
+    if (dlsym(RTLD_DEFAULT, "mallctl") != NULL ||
+        dlsym(RTLD_DEFAULT, "je_mallctl") != NULL)
+        return "jemalloc";
 #endif
     return o->alloc->name;
 }
