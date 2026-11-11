@@ -88,6 +88,11 @@ set_tests_properties(test_stress PROPERTIES LABELS stress)
 # The harshest purge setting: every page is decommitted the moment it is free.
 add_test(NAME test_stress_purge COMMAND test_stress)
 set_tests_properties(test_stress_purge PROPERTIES LABELS stress ENVIRONMENT TSMALLOC_PURGE_DELAY=0)
+# Seeded random calls over the whole API, checked against shadow copies. The
+# seed is printed; TS_FUZZ_SEED=<seed> repeats a run.
+ts_add_test(test_fuzz)
+set_tests_properties(test_fuzz PROPERTIES LABELS stress)
+target_compile_definitions(test_fuzz PRIVATE _POSIX_C_SOURCE=200809L)
 
 # With TS_DEBUG on for the whole build, every block is 8 bytes bigger than its
 # request. These tests check exact block sizes or same-block reuse, or free
