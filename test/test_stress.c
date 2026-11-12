@@ -4,6 +4,7 @@
 #include "tsmalloc.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 
 /* Multithreaded stress through the public API only.
@@ -33,6 +34,7 @@ _Static_assert(sizeof(hdr_t) == 16, "header keeps the body 16-aligned");
 static _Atomic(uintptr_t) shared[SHARED];
 static _Atomic long errors;
 static long ops_per_worker;
+static _Atomic int wave_started;
 
 static long scale(void) {
     const char *s = getenv("TS_TEST_SCALE");
@@ -178,6 +180,12 @@ static unsigned char *realloc_block(unsigned char *p, uint32_t *rs) {
 static void *worker(void *arg) {
     uint32_t rs = (uint32_t)(uintptr_t)arg * 2654435761u | 1;
     unsigned char *mine[LOCAL] = {0};
+    /* Start the whole wave together. Without this a fast machine can run
+     * most workers one after another, and a wave that never overlaps maps
+     * far fewer segments than one that does. */
+    atomic_fetch_add(&wave_started, 1);
+    while (atomic_load(&wave_started) < WORKERS)
+        sched_yield();
     for (long op = 0; op < ops_per_worker; op++) {
         uint32_t r = rnd(&rs);
         unsigned char **slot = &mine[(r >> 4) % LOCAL];
@@ -215,15 +223,19 @@ static void *worker(void *arg) {
 
 TEST(stress_random_ops_across_threads_and_waves) {
     ops_per_worker = OPS * scale();
-    size_t mapped_after_first = 0;
+    size_t baseline = 0;
     for (int wave = 0; wave < WAVES; wave++) {
         pthread_t t[WORKERS];
+        atomic_store(&wave_started, 0);
         for (uintptr_t i = 0; i < WORKERS; i++)
             REQUIRE(pthread_create(&t[i], NULL, worker, (void *)(wave * WORKERS + i + 1)) == 0);
         for (int i = 0; i < WORKERS; i++)
             pthread_join(t[i], NULL);
-        if (wave == 0)
-            mapped_after_first = ts_segment_count();
+        /* Wave 0 starts with an empty shared table; from wave 1 on, every
+         * wave also inherits up to SHARED live blocks, so that's the first
+         * wave whose footprint the later ones should match. */
+        if (wave == 1)
+            baseline = ts_segment_count();
     }
     /* The main thread frees what the last wave left, all of it remote. */
     for (size_t i = 0; i < SHARED; i++) {
@@ -235,7 +247,7 @@ TEST(stress_random_ops_across_threads_and_waves) {
     /* Later waves adopt what earlier ones left instead of mapping more.
      * Per-wave memory is about the same, so allow some slack, not growth
      * proportional to the number of waves. */
-    CHECK(ts_segment_count() <= 2 * mapped_after_first + 4);
+    CHECK(ts_segment_count() <= 2 * baseline + 4);
 }
 
 /* realloc and free of blocks whose owner is alive and busy allocating:
