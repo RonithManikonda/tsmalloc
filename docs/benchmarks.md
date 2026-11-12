@@ -1,7 +1,7 @@
 # Benchmarks
 
-Numbers come from `scripts/bench.sh`: a Release build, each benchmark at 1, 2, 4, 8 and 14 threads,
-3 runs per cell, median shown. Throughput is millions of operations per second (Mops/s), so higher is
+Numbers come from `scripts/bench.sh` and `scripts/bench_override.sh`: a Release build, each benchmark at
+1, 2, 4, 8 and 14 threads, 3 runs per cell, median shown. Throughput is millions of operations per second (Mops/s), so higher is
 better. The last column is tsmalloc divided by the system allocator: above 1.00x means tsmalloc wins.
 
 | Benchmark | What it does |
@@ -10,6 +10,91 @@ better. The last column is tsmalloc divided by the system allocator: above 1.00x
 | `larson` | server simulation: threads replace random blocks (16–1024 B), then hand their arrays to new threads |
 | `xmalloc` | producer/consumer pairs: one thread allocates, the other frees (every free is remote) |
 | `cache_scratch` | main allocates small objects, workers write to them; measures false sharing, ops are byte writes |
+
+## Summary
+
+### Method
+
+- **What runs.** The four programs above, in a Release build (`-O3`, `-pthread`). The headline numbers use
+  the `*_plain` builds through `scripts/bench_override.sh`. These programs call only `malloc` and `free` and
+  contain no tsmalloc code. Each one runs once as built, and once with `libtsmalloc` injected
+  (`DYLD_INSERT_LIBRARIES` on macOS, `LD_PRELOAD` on Linux). So the comparison is what an ordinary
+  `-pthread` program gets without changing its source. Every run reports the allocator that actually served
+  it, and the script stops if that isn't the one requested.
+- **Cells.** 1, 2, 4, 8 and 14 threads (xmalloc rounds up to pairs). The median of 3 runs per cell on the
+  Mac, 1 run in CI. Mops/s is millions of operations per second, so higher is better. The last column is
+  tsmalloc ÷ system.
+- **Noise.** On the Mac, single cells move by ±30% between runs, and everything can halve when the machine
+  is busy (check `uptime` first). Treat a cell as rough and the pattern across a row as what holds.
+
+### Machines
+
+| Where | CPU | OS / system allocator | Runs |
+|---|---|---|---|
+| Development Mac | Apple M4 Pro, 14 cores (10 performance + 4 efficiency), arm64 | macOS 26.3.1, libmalloc | 3 per cell |
+| Docker on that Mac | same, 14 virtual CPUs | Ubuntu 24.04 arm64, glibc 2.39 | 3 per cell |
+| GitHub Actions `ubuntu-latest` | x86-64, 4 vCPUs | Ubuntu 26.04, glibc | 1, `--quick` |
+| GitHub Actions `macos-latest` | Apple silicon VM, 3 vCPUs | macOS 26, libmalloc | 1, `--quick` |
+
+### Headline: unmodified programs, tsmalloc ÷ system
+
+Ranges over thread counts, from the full tables further down: macOS and Docker from step 39, x86-64 from
+the CI release job of 2026-11-10 (override runs, `gcc` job). The `clang` job's cells differ from these by up to
+2x in both directions, which is how noisy single runs on shared runners are.
+
+| bench | macOS, M4 Pro | Linux arm64 (Docker) | Linux x86-64 (CI) |
+|---|---:|---:|---:|
+| `threadtest` (4 sizes) | 3.3x – 89x | 1.4x – 2.5x | 1.3x – 2.2x |
+| `larson` | 3.1x – 12x | 1.3x – 1.4x | 0.87x – 1.05x |
+| `xmalloc` | 1.5x – 3.3x | 4.3x – 5.1x | 5.9x – 6.5x |
+| `cache_scratch` | 1.05x – 4.4x | 1.0x – 5.8x | 0.99x – 3.6x |
+
+On macOS tsmalloc is ahead in every cell, by an order of magnitude once several threads allocate at the
+same time. On Linux it is ahead nearly everywhere, and by far the most where blocks cross threads.
+
+### Where tsmalloc wins, where it doesn't, and why
+
+- **Threads that allocate and free their own blocks (`threadtest`).** tsmalloc's fast path is a few loads
+  and stores on memory only this thread touches, with no lock and no atomic. libmalloc takes a magazine
+  lock on every call, and a thread that moves between cores lands on another core's magazine. That is why
+  the gap grows with the thread count (89x at 14 threads for 1 KiB blocks). glibc already has a per-thread
+  cache (tcache) in front of its arenas, so the gap there is the tcache's bookkeeping and the arena
+  refills behind it: 1.4x to 2.5x.
+- **Every free from another thread (`xmalloc`).** This is the best case on Linux. In glibc a cross-thread
+  free locks the arena that owns the chunk, and producer and consumer contend on that lock all the time.
+  In tsmalloc the free is one CAS onto a list only freers write, and the producer takes the whole list
+  back with one atomic. On macOS libmalloc gets closer here (1.5x at 2 threads). The cost on tsmalloc's
+  side shows in the profile further down: walking a list of blocks last written by another core takes a
+  cache miss per block.
+- **Blocks handed to new threads (`larson`).** Big wins against libmalloc, but level on x86-64 glibc (0.8x
+  to 1.1x across the two CI jobs). larson's threads free many blocks that other threads allocated. glibc puts
+  such a chunk in the *freeing* thread's tcache, which reuses it right away with no lock. tsmalloc must
+  send it back to the page it came from (a remote free), and the owner sees it only on its next slow path.
+  Returning blocks to their owner is what keeps pages whole and memory from scattering across threads,
+  so this is a cost the design accepts.
+- **False sharing (`cache_scratch`).** At 1 thread every allocator is level, as expected. With more threads
+  tsmalloc gives each worker blocks from its own pages, so workers' writes don't share cache lines.
+  libmalloc's and glibc's adjacent small blocks can belong to different threads.
+- **Huge blocks.** Not in the tables. A loop that allocates, touches and frees 2 MiB runs at about
+  2.05 M ops/s with tsmalloc's huge cache against 1.08 M ops/s with libmalloc (step 31).
+- **Memory, not speed.** These benchmarks measure throughput only. tsmalloc has no coalescing and keeps
+  partly used pages per thread, so a program with many threads and small, scattered working sets can use
+  more memory than ptmalloc. Purging and the spare-page caps limit this, but it isn't measured here.
+
+### Caveats
+
+- The Linux arm64 numbers come from Docker on the Mac, and the native x86-64 ones from single `--quick`
+  runs on shared CI machines. On the 3-vCPU macOS CI runner one `xmalloc` cell at 2 threads came out at
+  0.60x. A dedicated Linux machine is the missing measurement.
+- jemalloc and mimalloc aren't compared yet (see the end of this file). Beating the system allocator is
+  the goal so far, not beating the specialist allocators.
+- Re-runs of the macOS override sweep on 2026-11-11, with the load average between 7 and 11 from other
+  work, came out lower across the board. Most of the drop was in the 8-thread cells, where both allocators
+  fell. tsmalloc still led in every cell, by similar ratios. Run alternately with a build from before
+  steps 41–42, the current build was as fast or faster (`threadtest --threads=8`), so the drop was the
+  machine, not a regression.
+
+The rest of this file is the step-by-step record, kept with the numbers as measured at the time.
 
 ## Thread-local heaps (steps 18–24)
 
@@ -298,6 +383,29 @@ than against libmalloc: about 1.3x to 2.5x when threads keep to their own blocks
 | xmalloc | 2 | 12.36 | 55.57 | 4.50x |
 | xmalloc | 4 | 23.12 | 99.70 | 4.31x |
 | xmalloc | 8 | 20.44 | 105.15 | 5.14x |
+
+### Linux x86-64, glibc (GitHub Actions `ubuntu-latest`, gcc, 2026-11-10)
+
+From the CI release job: `bench_override.sh --quick --threads="1 4" --reps=1` on a shared 4-vCPU runner,
+so one short run per cell. The first native x86-64 numbers, and the pattern matches Docker: `xmalloc` is
+where tsmalloc gains most, and `larson` is level.
+
+| bench | threads | system Mops/s | ts Mops/s | ts / system |
+|---|---:|---:|---:|---:|
+| cache_scratch | 1 | 3533.05 | 3482.72 | 0.99x |
+| cache_scratch | 4 | 2017.39 | 7180.21 | 3.56x |
+| larson | 1 | 21.42 | 22.54 | 1.05x |
+| larson | 4 | 34.67 | 29.99 | 0.87x |
+| threadtest-1024 | 1 | 33.12 | 73.74 | 2.23x |
+| threadtest-1024 | 4 | 71.60 | 116.11 | 1.62x |
+| threadtest-16 | 1 | 47.75 | 88.15 | 1.85x |
+| threadtest-16 | 4 | 77.89 | 100.06 | 1.28x |
+| threadtest-256 | 1 | 50.14 | 85.33 | 1.70x |
+| threadtest-256 | 4 | 105.89 | 137.45 | 1.30x |
+| threadtest-64 | 1 | 49.98 | 89.22 | 1.79x |
+| threadtest-64 | 4 | 105.01 | 146.02 | 1.39x |
+| xmalloc | 2 | 3.82 | 22.52 | 5.90x |
+| xmalloc | 4 | 5.69 | 37.23 | 6.54x |
 
 ## Against jemalloc and mimalloc (step 44)
 
