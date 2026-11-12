@@ -33,7 +33,8 @@ until another thread adopts them. Larger sizes get their own `mmap`'d region. Th
 headers: `ts_free` masks the pointer to find its segment or mapping and reads the block size from
 there.
 
-Benchmarks and numbers against macOS libmalloc are in
+How it all fits together, including why the remote-free path is safe, is in
+[docs/design.md](docs/design.md). Benchmarks and numbers against macOS libmalloc are in
 [docs/benchmarks.md](docs/benchmarks.md). Run them with `scripts/bench.sh` (`--quick` for a short
 sanity run).
 
