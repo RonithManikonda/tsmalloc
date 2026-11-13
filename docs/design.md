@@ -195,7 +195,9 @@ its own.
 - **Foreign pointers.** An injected allocator gets `free` calls for memory allocated before it
   loaded. Masking such a pointer and reading a "header" could fault. So every 4 MiB chunk we own is
   marked in a bitmap over the 48-bit address space (`src/registry.c`): 8 MiB reserved, almost none of
-  it ever touched. `ts_is_ours` checks the bit and the header. On macOS foreign pointers go back to
+  it ever touched. `ts_is_ours` checks the bit and the header. A huge mapping reserves the rest of its
+  last chunk, so a chunk with its bit set holds nobody else's memory, and the header read can't race
+  with us unmapping a chunk someone else's pointer lives in. On macOS foreign pointers go back to
   the zone that allocated them. On Linux `free` ignores them and `realloc` fails on them.
 - **fork**: `pthread_atfork` handlers hold the global locks (abandoned list, huge cache, the
   `busy_gate` around the delayed path) across `fork`, so the child doesn't inherit a lock held by a

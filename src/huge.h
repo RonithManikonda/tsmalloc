@@ -6,6 +6,8 @@
 /*
  * Blocks above TS_MEDIUM_MAX: each gets a mapping of its own, aligned to the
  * segment size, with a ts_huge_t in front so a mask of the pointer finds it.
+ * The mapping reserves whole segment-sized chunks; `mapped` is the part in
+ * use, and the rest of the last chunk is never touched.
  *
  * mmap and munmap are slow and every new page faults, so freed mappings go
  * into a small process-wide cache instead of straight back to the OS. It is
@@ -44,7 +46,8 @@ void *ts_huge_alloc_zeroed(size_t size, size_t align);
 /* Free the block at `p`, whose header is `h`. */
 void ts_huge_free(ts_huge_t *h, void *p);
 
-/* Give back the whole OS pages past the first `size` bytes, in place. */
+/* Give back the whole OS pages past the first `size` bytes, in place: whole
+ * chunks are unmapped, the rest of the last chunk is decommitted. */
 void ts_huge_shrink(ts_huge_t *h, void *p, size_t size);
 
 TS_INLINE size_t ts_huge_usable(const ts_huge_t *h) {

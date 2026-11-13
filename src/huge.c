@@ -46,6 +46,15 @@ static unsigned bucket_of(size_t mapped) {
     return ts_bsr(mapped) - TS_HUGE_MIN_SHIFT;
 }
 
+/* Address space actually held for a mapping of `mapped` bytes: the rest of
+ * its last segment-sized chunk is kept too, never used, never touched (so it
+ * costs no memory). A chunk whose registry bit is set then belongs to us
+ * alone, and ts_is_ours never reads a header in a chunk that holds somebody
+ * else's pointer, a header we could be unmapping at that very moment. */
+static size_t reserved(size_t mapped) {
+    return ts_align_up(mapped, TS_SEGMENT_SIZE);
+}
+
 static int cacheable(size_t mapped) {
     return mapped >= ((size_t)1 << TS_HUGE_MIN_SHIFT) && mapped <= TS_HUGE_CACHE_MAX_SIZE;
 }
@@ -162,7 +171,7 @@ static void cache_put(void *base, size_t mapped) {
     pthread_mutex_unlock(&cache_lock);
 
     for (size_t i = 0; i < nvictims; i++) {
-        ts_os_free(victims[i].base, victims[i].mapped);
+        ts_os_free(victims[i].base, reserved(victims[i].mapped));
         TS_STAT_INC(TS_STAT_HUGE_UNMAP);
     }
 }
@@ -177,7 +186,7 @@ static void *finish_block(char *base, size_t lead, size_t mapped) {
     h->lead = (uint32_t)lead;
     h->mapped = mapped;
     if (!ts_registry_add(h)) {
-        ts_os_free(base, mapped);
+        ts_os_free(base, reserved(mapped));
         return NULL; /* errno is ENOMEM */
     }
     return user;
@@ -206,7 +215,7 @@ static void *huge_map(size_t size, size_t align, int may_recycle) {
     }
 
     size_t map_align = align > TS_SEGMENT_SIZE ? align : TS_SEGMENT_SIZE;
-    char *base = ts_os_alloc_aligned(total, map_align);
+    char *base = ts_os_alloc_aligned(reserved(mapped), map_align);
     if (base == NULL)
         return NULL;
     TS_STAT_INC(TS_STAT_HUGE_MAP);
@@ -228,7 +237,7 @@ void ts_huge_free(ts_huge_t *h, void *p) {
 
     ts_registry_remove(h);
     if (lead > TS_SEGMENT_SIZE || !cacheable(mapped)) {
-        ts_os_free(base, mapped);
+        ts_os_free(base, reserved(mapped));
         TS_STAT_INC(TS_STAT_HUGE_UNMAP);
         return;
     }
@@ -239,7 +248,15 @@ void ts_huge_shrink(ts_huge_t *h, void *p, size_t size) {
     size_t keep = ts_align_up(h->lead + size, ts_os_page_size());
     if (keep < h->mapped) {
         char *base = (char *)p - h->lead;
-        ts_os_free(base + keep, h->mapped - keep);
+        /* Whole chunks past the new end go back to the OS. The pages between
+         * the new end and its chunk boundary stay reserved, and are only
+         * decommitted. */
+        size_t old_end = reserved(h->mapped);
+        size_t new_end = reserved(keep);
+        if (new_end < old_end)
+            ts_os_free(base + new_end, old_end - new_end);
+        size_t used_end = h->mapped < new_end ? h->mapped : new_end;
+        ts_os_decommit(base + keep, used_end - keep);
         h->mapped = keep;
     }
 }
@@ -262,7 +279,7 @@ void ts_huge_cache_flush(void) {
         pthread_mutex_unlock(&cache_lock);
         if (b == NULL)
             return;
-        ts_os_free(e.base, e.mapped);
+        ts_os_free(e.base, reserved(e.mapped));
         TS_STAT_INC(TS_STAT_HUGE_UNMAP);
     }
 }

@@ -68,11 +68,17 @@ int ts_is_ours(const void *p) {
     if (!chunk_is_ours(last))
         return 0;
 
-    /* A set bit alone isn't enough, for two reasons. p - 1 lands in the chunk
-     * before p when p is chunk aligned, and that chunk may be ours while p
-     * is somebody else's. And a huge mapping under 4 MiB (or one shrunk by
-     * realloc) doesn't cover its chunk, so another mapping can sit in the
-     * rest of it. The header settles both. */
+    /* A set bit alone isn't enough: p - 1 lands in the chunk before p when p
+     * is chunk aligned, and that chunk may be ours while p is somebody
+     * else's. The header settles it, and also rejects pointers into the
+     * middle of our blocks. Reading it is safe whenever p is inside the
+     * chunk: we hold every chunk with a set bit whole (huge mappings reserve
+     * the rest of their last chunk), so p can only be ours, and freeing a
+     * block while also asking about it is a double free.
+     *
+     * The one remaining window is a foreign p right at the start of the
+     * chunk after one of ours: if that chunk of ours is unmapped between the
+     * bit check and the header read, the read faults. */
     const ts_segment_t *region = ts_ptr_segment(last);
     if (region->kind == TS_KIND_SEGMENT)
         return ((uintptr_t)p & TS_SEGMENT_MASK) != 0;

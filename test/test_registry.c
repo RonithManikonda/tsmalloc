@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #define MIB ((size_t)1 << 20)
 
@@ -78,13 +79,48 @@ TEST(freed_huge_block_is_not_ours_even_while_cached) {
 }
 
 TEST(huge_block_address_must_be_exact) {
-    /* 1 MiB mapped in a 4 MiB chunk: the chunk's bit is set, but the rest of
-     * it is free for anyone. These are compared, never dereferenced. */
+    /* 1 MiB used in a 4 MiB chunk: the chunk's bit is set, but only one
+     * address in it is a block. These are compared, never dereferenced. */
     char *p = ts_malloc(MIB);
     REQUIRE(p != NULL);
     CHECK(ts_is_ours(p));
     CHECK(!ts_is_ours(p + 16));
     CHECK(!ts_is_ours(p + 2 * MIB));
+    ts_free(p);
+    ts_huge_cache_flush();
+}
+
+/* Asks the OS for 64 KiB at `hint`: 1 if it got that address, 0 if it got
+ * another, -1 if mmap failed. Without MAP_FIXED the hint is only a
+ * preference, so this never replaces anything; it lands there only if the
+ * range is free. */
+static int could_map_at(char *hint) {
+    size_t len = 64 * 1024;
+    void *q = mmap(hint, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (q == MAP_FAILED)
+        return -1;
+    munmap(q, len);
+    return (char *)q >= hint && (char *)q < hint + len;
+}
+
+TEST(huge_block_keeps_the_rest_of_its_chunk) {
+    /* While a chunk's bit is set, nobody else may map anything in it, or
+     * ts_is_ours on their pointer could read our header just as we unmap it. */
+    char *p = ts_malloc(MIB);
+    REQUIRE(p != NULL);
+    char *chunk = (char *)ts_ptr_segment(p - 1);
+    CHECK_EQ(could_map_at(chunk + 2 * MIB), 0);
+    CHECK_EQ(could_map_at(chunk + TS_SEGMENT_SIZE - 64 * 1024), 0);
+    ts_free(p);
+    ts_huge_cache_flush();
+
+    /* The same after a shrink gives pages back. */
+    p = ts_malloc(6 * MIB);
+    REQUIRE(p != NULL);
+    REQUIRE(ts_realloc(p, MIB) == p);
+    chunk = (char *)ts_ptr_segment(p - 1);
+    CHECK_EQ(could_map_at(chunk + 2 * MIB), 0);
+    CHECK_EQ(could_map_at(chunk + TS_SEGMENT_SIZE + MIB), 1);
     ts_free(p);
     ts_huge_cache_flush();
 }
